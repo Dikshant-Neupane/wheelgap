@@ -496,18 +496,6 @@ def _parsed_marker(marker: str) -> Marker | None:
     return _marker_cache[marker]
 
 
-def poetry_marker_holds(marker: str, target: Target | None, extras: PoetryExtras) -> bool:
-    """Whether a Poetry 2.x lock marker can hold on `target` with these extras (see _poetry_extra). With no target,
-    whether it can hold on any target: only its extra comparisons are known then."""
-    m = _parsed_marker(marker)
-    if m is None:
-        return True  # can't parse it: assume the package is needed rather than hide a gap
-    try:
-        return _evaluate3(m._markers, target, poetry_extras=extras) is not False
-    except Exception:  # packaging changed its internals: count it as needed rather than hide a gap
-        return True
-
-
 def poetry_extras_decide(marker: str, extras: PoetryExtras) -> tuple[bool | None, bool]:
     """How the selected extras decide a Poetry 2.x lock marker. If it's only `extra` comparisons on the project's
     extras (`extra == "a" or extra == "b"`), the selection alone decides it: (True or False, False). Anything else

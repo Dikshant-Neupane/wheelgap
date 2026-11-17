@@ -5,7 +5,7 @@ import tomllib
 import pytest
 
 from wheelgap import check as check_module
-from wheelgap.check import check, marker_holds, poetry_extras_decide, poetry_marker_holds, reachable
+from wheelgap.check import check, marker_holds, poetry_extras_decide, reachable
 from wheelgap.cli import main
 from wheelgap.sources import (
     SourceError,
@@ -1082,6 +1082,12 @@ def test_poetry_lock_extras_leave_nothing_out_when_poetry_versions_disagree(
         ('[project.optional-dependencies]\na = ["six"]\nb = ["six"]\nall = ["six", "attrs"]\n', []),  # locks right
         ("[project.optional-dependencies]\na = [\"six; os_name == 'nt'\"]\nb = [\"six; os_name == 'nt'\"]\n", ["six"]),
         ('[project.optional-dependencies]\na = ["six"]\nb = ["six>=1"]\n', ["six"]),
+        ('[project.optional-dependencies]\nx = ["requests"]\ny = ["requests[socks]"]\n', ["requests"]),
+        (
+            '[project.optional-dependencies]\nx = ["requests"]\n'
+            'y = ["requests @ https://files.example/requests-1.0.tar.gz"]\n',
+            ["requests"],
+        ),
         ("[project.optional-dependencies]\na = [\"six; os_name == 'nt'\"]\n", []),  # one entry: locked right
         ('[project]\ndependencies = ["six"]\n\n[project.optional-dependencies]\na = ["six"]\n', ["six"]),
         (
@@ -1162,36 +1168,13 @@ def test_poetry_extras_declared_elsewhere(pyproject, expected):
     assert _poetry_extras_declared_elsewhere(tomllib.loads(pyproject)) == (expected, [])
 
 
-def test_poetry_extra_markers_have_poetry_meanings(monkeypatch):
-    (target,) = build_targets(["3.13"], ["linux-x86_64"])
-    extras = (frozenset({"a", "b", "c", "fancy-name"}), frozenset({"a", "b"}))
-    assert poetry_marker_holds('extra == "a" and extra == "b"', target, extras)  # `extra` is a set of extras
-    assert poetry_marker_holds('"b" == extra', target, extras)
-    assert not poetry_marker_holds('"c" == extra', target, extras)
-    assert not poetry_marker_holds('extra != "a"', target, extras)
-    assert not poetry_marker_holds('extra == "Fancy_Name"', target, extras)  # normalized, and not selected
-    assert not poetry_marker_holds('extra == "a" and sys_platform == "win32"', target, extras)
-    assert not poetry_marker_holds(
-        '(extra == "c" or extra == "fancy-name") and sys_platform == "linux"', target, extras
-    )
-    assert poetry_marker_holds('(extra == "c" or extra == "a") and sys_platform == "linux"', target, extras)
-    # Unknown, so kept: a name that isn't one of the project's extras, another operator, another variable.
-    assert poetry_marker_holds('extra == "other"', target, extras)
-    assert poetry_marker_holds('"a" in extra', target, extras)
-    assert poetry_marker_holds("extra == sys_platform", target, extras)
-    assert poetry_marker_holds("not a marker ((", target, extras)
-    # With no target, only extras are known: whether the marker can hold on some target.
-    assert poetry_marker_holds('extra == "fancy-name"', None, (extras[0], frozenset())) is False
-    assert poetry_marker_holds('extra == "a" and sys_platform == "win32"', None, extras)
-    monkeypatch.setattr(check_module, "_evaluate3", lambda *a, **k: 1 / 0)
-    assert poetry_marker_holds('extra == "c"', target, extras)  # packaging changed: kept rather than hidden
-
-
 @pytest.mark.parametrize(
     "marker, decided",
     [
         # Only extra comparisons on the project's extras: the selection decides them.
         ('extra == "a" or extra == "b"', (True, False)),
+        ('extra == "a" and extra == "b"', (True, False)),  # `extra` is the set of extras selected
+        ('extra != "a"', (False, False)),
         ('extra == "c"', (False, False)),
         ('"c" == extra', (False, False)),
         ('extra == "Fancy_Name"', (False, False)),  # normalized: fancy-name, not selected
@@ -1327,6 +1310,55 @@ def test_poetry_lock_unconditional_dependency_an_extra_reaches_needs_no_note(tmp
     (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     code, names, err = _names(capsys, [str(tmp_path), "--only-group", "main"], target="macos-arm64", python="3.12")
     assert names == {"idna"} and "note" not in err
+
+
+def test_poetry_lock_without_extras_or_pyproject_prints_no_note(tmp_path, capsys, fake_pypi):
+    lock = _lock(("app-dep", None), extras="").replace("[extras]\n\n", "")
+    (tmp_path / "poetry.lock").write_text(lock, encoding="utf-8")
+    code, names, err = _names(capsys, [str(tmp_path), "--only-group", "main"], target="macos-arm64", python="3.12")
+    assert names == {"app-dep"} and "note" not in err
+
+
+# macpkg is in extra x, and the dev group reaches it (through macwrapper) only on macOS.
+MIXED_GROUPS_LOCK = """\
+[[package]]
+name = "macwrapper"
+version = "1.0"
+groups = ["dev"]
+files = [{file = "macwrapper-1.0-py3-none-any.whl", hash = "sha256:00"}]
+
+[[package]]
+name = "macpkg"
+version = "1.0"
+groups = ["main", "dev"]
+markers = {main = "extra == \\"x\\"", dev = "sys_platform == \\"darwin\\""}
+files = [{file = "macpkg-1.0.tar.gz", hash = "sha256:00"}]
+
+[extras]
+x = ["macpkg"]
+
+[metadata]
+lock-version = "2.1"
+python-versions = ">=3.10"
+"""
+
+
+@pytest.mark.parametrize(
+    "args, target, kept",
+    [
+        (["--group", "dev"], "macos-arm64", True),
+        (["--group", "dev"], "linux-x86_64", False),  # x isn't selected and dev only needs it on macOS
+        (["--extra", "x"], "linux-x86_64", True),  # the selected extra installs it everywhere
+        (["--no-dev"], "macos-arm64", False),
+    ],
+)
+def test_poetry_lock_false_extra_marker_in_one_group_leaves_the_others(tmp_path, capsys, fake_pypi, args, target, kept):
+    (tmp_path / "poetry.lock").write_text(MIXED_GROUPS_LOCK, encoding="utf-8")
+    pyproject = PEP621 + '\n[project.optional-dependencies]\nx = ["macpkg"]\n\n'
+    pyproject += '[tool.poetry.group.dev.dependencies]\nmacwrapper = "*"\n'
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    _, names, err = _names(capsys, [str(tmp_path), *args], target=target, python="3.13")
+    assert ("macpkg" in names) is kept and "note" not in err
 
 
 def test_poetry_lock_unreadable_requirement_leaves_nothing_out(poetry_extras, capsys, fake_pypi):
