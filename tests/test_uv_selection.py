@@ -1361,6 +1361,17 @@ def test_poetry_lock_false_extra_marker_in_one_group_leaves_the_others(tmp_path,
     assert ("macpkg" in names) is kept and "note" not in err
 
 
+def test_poetry_lock_selected_extra_in_one_group_needs_no_note(tmp_path, capsys, fake_pypi):
+    # dev's marker would rule out the unselected extra y, but the selected x installs macpkg everywhere anyway.
+    lock = MIXED_GROUPS_LOCK.replace('sys_platform == \\"darwin\\"', 'sys_platform == \\"darwin\\" or extra == \\"y\\"')
+    (tmp_path / "poetry.lock").write_text(lock.replace('x = ["macpkg"]', 'x = ["macpkg"]\ny = []'), encoding="utf-8")
+    pyproject = PEP621 + '\n[project.optional-dependencies]\nx = ["macpkg"]\ny = []\n\n'
+    pyproject += '[tool.poetry.group.dev.dependencies]\nmacwrapper = "*"\n'
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    _, names, err = _names(capsys, [str(tmp_path), "--extra", "x"], target="linux-x86_64", python="3.13")
+    assert "macpkg" in names and "note" not in err
+
+
 def test_poetry_lock_unreadable_requirement_leaves_nothing_out(poetry_extras, capsys, fake_pypi):
     pyproject = poetry_extras / "pyproject.toml"
     pyproject.write_text(POETRY_EXTRAS_PYPROJECT.replace('"app-dep"]', '"app-dep", "not a requirement (("]'), "utf-8")
