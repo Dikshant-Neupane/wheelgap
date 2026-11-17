@@ -1343,8 +1343,9 @@ python-versions = ">=3.10"
 """
 
 
-# dev needs macpkg only on macOS, and main only for the unselected extra x. Poetry 2.0-2.2 install it everywhere
-# then (B3 in test_poetry_lock_mixed_extra_markers_report_a_superset), so it's kept on every target, with the note.
+# dev needs macpkg only on macOS, and main only for the unselected extra x: B3's lock marker in
+# test_poetry_lock_mixed_extra_markers_report_a_superset, where Poetry 2.2.1 installs the package everywhere. So it's
+# kept on every target, with the note, a superset of both Poetry versions.
 @pytest.mark.parametrize(
     "args, target, kept, note",
     [
