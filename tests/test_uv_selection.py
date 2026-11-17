@@ -1343,22 +1343,27 @@ python-versions = ">=3.10"
 """
 
 
+# dev needs macpkg only on macOS, and main only for the unselected extra x. Poetry 2.0-2.2 install it everywhere
+# then (B3 in test_poetry_lock_mixed_extra_markers_report_a_superset), so it's kept on every target, with the note.
 @pytest.mark.parametrize(
-    "args, target, kept",
+    "args, target, kept, note",
     [
-        (["--group", "dev"], "macos-arm64", True),
-        (["--group", "dev"], "linux-x86_64", False),  # x isn't selected and dev only needs it on macOS
-        (["--extra", "x"], "linux-x86_64", True),  # the selected extra installs it everywhere
-        (["--no-dev"], "macos-arm64", False),
+        (["--group", "dev"], "macos-arm64", True, True),
+        (["--group", "dev"], "linux-x86_64", True, True),
+        (["--extra", "x"], "linux-x86_64", True, False),  # the selected extra installs it everywhere
+        (["--no-dev"], "macos-arm64", False, False),  # only main's marker, which x alone decides
     ],
 )
-def test_poetry_lock_false_extra_marker_in_one_group_leaves_the_others(tmp_path, capsys, fake_pypi, args, target, kept):
+def test_poetry_lock_false_extra_marker_beside_a_platform_marker_is_kept(
+    tmp_path, capsys, fake_pypi, args, target, kept, note
+):
     (tmp_path / "poetry.lock").write_text(MIXED_GROUPS_LOCK, encoding="utf-8")
     pyproject = PEP621 + '\n[project.optional-dependencies]\nx = ["macpkg"]\n\n'
     pyproject += '[tool.poetry.group.dev.dependencies]\nmacwrapper = "*"\n'
     (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     _, names, err = _names(capsys, [str(tmp_path), *args], target=target, python="3.13")
-    assert ("macpkg" in names) is kept and "note" not in err
+    assert ("macpkg" in names) is kept
+    assert ("kept for every extra" in err) is note, err
 
 
 def test_poetry_lock_selected_extra_in_one_group_needs_no_note(tmp_path, capsys, fake_pypi):

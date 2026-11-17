@@ -657,14 +657,13 @@ def _select_poetry(source: Source, selection: UvSelection) -> None:
             decided = [poetry_extras_decide(m, extras) for m in markers]
             if any(holds for holds, _ in decided):
                 markers = None  # a selected extra installs it, on every target
-            else:
-                # A marker the selection alone rules out (`extra == "x"`, x not selected) installs it nowhere.
-                markers = [m for m, (holds, _) in zip(markers, decided, strict=True) if holds is None] or None
-                if markers is None:
-                    source.unselected_keys.add(pkg.key)  # only for extras that aren't selected
-                    continue
-                if any(ruled_out for holds, ruled_out in decided if holds is None):
-                    kept_anyway.append(pkg.name)  # the extras selected would have left it out somewhere
+            elif all(holds is not None for holds, _ in decided):
+                source.unselected_keys.add(pkg.key)  # only for extras that aren't selected
+                continue
+            elif any(holds is False or ruled_out for holds, ruled_out in decided):
+                # Keep the false `extra == "x"` marker beside another group's marker: Poetry 2.0-2.2 install the
+                # package everywhere then (B3 in test_poetry_lock_mixed_extra_markers_report_a_superset).
+                kept_anyway.append(pkg.name)  # the extras selected would have left it out somewhere
         pkg.markers = markers
         kept.append(pkg)
     if kept_anyway:
