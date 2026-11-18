@@ -1178,6 +1178,11 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
         "--pre -r base.txt\npurewheel==3.1\n",
         "--only-binary :all: --constraint=base.txt\n",
         "purewheel==3.1\n--pre \\\n-cbase.txt\n",
+        # pip shlex-splits the options, so quoted or escaped ones count too.
+        '--pre "-r" base.txt\n',
+        "--pre '-rbase.txt'\n",
+        "--pre \\-r base.txt\n",
+        '--pre --"requirement"=base.txt\n',
     ):
         (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
         with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
@@ -1265,6 +1270,26 @@ def test_dockerfile_requirements_refuses_a_pip_config_file_by_its_name(tmp_path,
         ["requirements.txt", *files],
     )
     with pytest.raises(DockerfileError, match=":2: a pip config file may change what pip installs"):
+        dockerfile_requirements(path)
+
+
+@pytest.mark.parametrize(
+    "copy",
+    [
+        # Copies wheelgap can't read may still bring in a pip config, even before the one that copies FILE.
+        "COPY --from=builder /etc/pip.conf /etc/pip.conf",
+        "ADD https://example.com/pip.conf /etc/pip.conf",
+        "ADD pip.conf /etc/pip.conf",
+        "COPY *.conf /etc/",
+    ],
+)
+def test_dockerfile_requirements_refuses_an_unread_copy_before_the_file(tmp_path, copy):
+    path = _context(
+        tmp_path,
+        f"FROM python:3.13\n{copy}\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n",
+        ["requirements.txt", "pip.conf"],
+    )
+    with pytest.raises(DockerfileError, match=r"Dockerfile:2: "):
         dockerfile_requirements(path)
 
 

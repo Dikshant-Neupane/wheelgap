@@ -1071,6 +1071,7 @@ def _has_include(text: str) -> bool:
         if line.startswith("#"):
             continue
         for token in line.split():
+            token = re.sub(r"[\"'\\]", "", token)  # pip shlex-splits options: `"-r"` and `\-r` are -r too
             option = token.split("=", 1)[0]
             if (
                 (token.startswith(("-r", "-c")) and not token.startswith("--"))
@@ -1246,6 +1247,9 @@ def _dockerfile_requirements(
                         f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
                     )
                 found.setdefault(host, number)
+            # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.
+            if unread := next((copy for copy in copies if copy.error), None):
+                raise DockerfileError(f"line {unread.line}: {unread.error}")
     if not found:
         raise DockerfileError(f"the final stage (line {final_line}) has no `RUN pip install -r FILE`")
     return [(number, host) for host, number in found.items()]
