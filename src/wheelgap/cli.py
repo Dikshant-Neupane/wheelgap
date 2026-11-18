@@ -1833,9 +1833,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if args.dockerfile_inputs:
         if not args.dockerfile:
             parser.error("--dockerfile-inputs reads what --dockerfile installs; pass --dockerfile too")
-        given = [
-            flag for flag, value in (("INPUT", args.inputs), ("--dist", args.dist), ("--deps", args.deps)) if value
-        ]
+        given = [flag for flag, value in (("INPUT", args.inputs), ("--dist", args.dist)) if value]
         if args.from_log is not None:
             given.append("--from-log")
         if given:
@@ -1844,9 +1842,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 f"so it can't be used with {', '.join(given)}"
             )
     installs: list[tuple[int, Path]] = []
+    # Where [tool.wheelgap] and .python-version are looked for: the Dockerfile's folder when it supplies the inputs.
+    config_inputs = [str(Path(args.dockerfile).parent)] if args.dockerfile_inputs else args.inputs
     try:
         if args.dockerfile_inputs:
-            installs = dockerfile_requirements(Path(args.dockerfile))
+            installs = dockerfile_requirements(Path(args.dockerfile), build_args)
             args.inputs = [str(requirements) for _, requirements in installs]
         if args.clear_cache:
             folder, count = cache.clear()
@@ -1854,10 +1854,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             if not args.inputs and not args.list_targets:
                 return 0
         if args.list_targets:
-            pyproject = find_pyproject(args.inputs or ([str(project)] if project else []))
+            pyproject = find_pyproject(config_inputs or ([str(project)] if project else []))
             print_target_list(args, load_config(pyproject) if pyproject else {})
             return 0
-        pyproject = find_pyproject(args.inputs or ([str(project)] if project else []))
+        pyproject = find_pyproject(config_inputs or ([str(project)] if project else []))
         config = load_config(pyproject) if pyproject else {}
         # quiet = true is a project default, so --from-log (which explains each package) on the command line wins over
         # it, as --no-quiet does; --quiet on the command line still applies.
@@ -1875,9 +1875,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             # The image beats pyproject.toml; flags still win.
             image = read_dockerfile(Path(args.dockerfile), build_args)
             if not quiet:
-                for line, requirements in installs:
+                for install_line, requirements in installs:
                     print(
-                        f"wheelgap: note: {args.dockerfile}:{line}: RUN pip install -r reads {requirements}",
+                        f"wheelgap: note: {args.dockerfile}:{install_line}: RUN pip install -r reads {requirements}",
                         file=sys.stderr,
                     )
                 for name, value in image.build_args:
@@ -1901,7 +1901,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         pythons = (
             args.python
             or config.get("python")
-            or read_python_version(project_dir(args.inputs or ([str(project)] if project else [])))
+            or read_python_version(project_dir(config_inputs or ([str(project)] if project else [])))
             or [running_python()]
         )
         platforms = args.target or config.get("targets", [])

@@ -1072,20 +1072,47 @@ def test_dockerfile_requirements_reads(tmp_path, dockerfile, files, expected):
 @pytest.mark.parametrize(
     ("dockerfile", "message"),
     [
-        ("FROM python:3.13\nRUN echo hi\n", "the final stage \\(line 1\\) has no `RUN pip install -r FILE`"),
+        ("FROM python:3.13\nRUN apt-get update\n", "the final stage \\(line 1\\) has no `RUN pip install -r FILE`"),
+        ("FROM python:3.13\nRUN echo hi\n", ":2: only `RUN pip install -r FILE` and system package commands"),
+        # A RUN that edits, replaces or removes the file between the COPY and the install.
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt .\nRUN echo uwsgi >> requirements.txt\n"
+            "RUN pip install -r requirements.txt\n",
+            ":4: only `RUN pip install",
+        ),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN sed -i /pywin32/d requirements.txt\n"
+            "RUN pip install -r requirements.txt\n",
+            ":4: only `RUN pip install",
+        ),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN apt-get update && rm requirements.txt\n"
+            "RUN pip install -r requirements.txt\n",
+            ":4: only `RUN pip install",
+        ),
+        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN python3 -mpip install uwsgi\n", ":4: only `RUN pip install"),
+        (
+            "FROM python:3.13\nARG PIP_INDEX_URL\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n",
+            ":2: an ARG setting PIP_ or UV_",
+        ),
+        (
+            "ARG BASE=deps\nFROM python:3.13-slim AS deps\nWORKDIR /app\nCOPY requirements.txt .\n"
+            "RUN pip install -r requirements.txt\nFROM ${BASE}\nRUN pip install -r /app/requirements.txt\n",
+            ":6: the final stage builds on an earlier stage",
+        ),
         (
             "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt && pip check\n",
-            ":4: may install Python packages, but --dockerfile-inputs only reads",
+            ":4: only `RUN pip install -r FILE`",
         ),
         ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install .\n", ":4: pip install \\.: --dockerfile-inputs"),
-        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN uv pip install --system -r requirements.txt\n", ":4: may"),
-        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r $REQS\n", ":4: may install"),
+        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN uv pip install --system -r requirements.txt\n", ":4: only"),
+        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r $REQS\n", ":4: only `RUN"),
         (
             "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN --mount=type=cache,target=/root/.cache pip install "
             "-r requirements.txt\n",
             ":4: RUN flags such as --mount",
         ),
-        ("FROM python:3.13\nRUN <<EOF\npip install numpy\nEOF\n", ":2: may install Python packages"),
+        ("FROM python:3.13\nRUN <<EOF\npip install numpy\nEOF\n", ":2: only `RUN pip install"),
         ("FROM python:3.13\nCOPY . .\nRUN pip install -r /requirements.txt\n", ":2: COPY to \\.: a relative"),
         ("FROM python:3.13\nRUN pip install -r requirements.txt\n", ":2: -r requirements.txt is relative"),
         ("FROM python:3.13\nWORKDIR /app\nRUN pip install -r requirements.txt\n", "isn't copied from the build"),
@@ -1136,9 +1163,11 @@ def test_dockerfile_requirements_refuses(tmp_path, dockerfile, message):
 
 def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_path):
     path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n")
-    (tmp_path / "requirements.txt").write_text("-r base.txt\npurewheel==3.1\n", encoding="utf-8")
-    with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
-        dockerfile_requirements(path)
+    # pip strips a byte order mark and reads abbreviated options, so these include base.txt too.
+    for text in ("-r base.txt\npurewheel==3.1\n", "\ufeff-r base.txt\n", "purewheel==3.1\n--req base.txt\n"):
+        (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
+        with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
+            dockerfile_requirements(path)
     (tmp_path / ".dockerignore").write_text("*.txt\n", encoding="utf-8")
     with pytest.raises(DockerfileError, match=r"\.dockerignore may leave files out of the build context"):
         dockerfile_requirements(path)
@@ -1181,3 +1210,45 @@ def test_cli_dockerfile_inputs_usage_errors(capsys, argv, error):
         main(argv)
     assert exc.value.code == 2
     assert error in capsys.readouterr().err
+
+
+def test_dockerfile_requirements_reads_system_package_commands(tmp_path):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13-slim\nRUN apt-get update && apt-get install -y --no-install-recommends gcc g++ "
+        "&& rm -rf /var/lib/apt/lists/*\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n",
+    )
+    assert dockerfile_requirements(path) == [(5, tmp_path / "requirements.txt")]
+
+
+def test_dockerfile_requirements_refuses_a_pip_config_file(tmp_path):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nCOPY pip.conf /etc/pip.conf\nWORKDIR /app\nCOPY requirements.txt .\n"
+        "RUN pip install -r requirements.txt\n",
+        ["requirements.txt", "pip.conf"],
+    )
+    with pytest.raises(DockerfileError, match=":2: a pip config file may change what pip installs"):
+        dockerfile_requirements(path)
+
+
+def test_dockerfile_requirements_refuses_a_symlink_that_overwrites_the_file(tmp_path):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY base.txt /app/requirements.txt\nCOPY . /app\n"
+        "RUN pip install -r requirements.txt\n",
+        ["base.txt", "reqs/prod.txt"],
+    )
+    try:
+        (tmp_path / "requirements.txt").symlink_to(tmp_path / "reqs" / "prod.txt")
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+    with pytest.raises(DockerfileError, match=":4: requirements.txt is a symlink"):
+        dockerfile_requirements(path)
+
+
+def test_cli_dockerfile_inputs_refuses_before_any_lookup(tmp_path, capsys, fake_pypi):
+    path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt && true\n")
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs"]) == 2
+    assert f"{path}:4: only `RUN pip install -r FILE`" in capsys.readouterr().err
+    assert fake_pypi == []

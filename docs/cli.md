@@ -70,15 +70,22 @@ final stage, such as `FROM python:3.13-alpine`. `-p`, `-t`, `--glibc` and `--mus
 
 `--dockerfile-inputs` (with `--dockerfile`, and no `INPUT`): check the requirements files the Dockerfile's final stage
 installs with `RUN pip install -r FILE`, on the image's Python and platform, so "will this image build without
-compiling anything?" is one command. `FILE` is followed back through `WORKDIR` and `COPY` to a file in the build
-context, taken to be the Dockerfile's folder, and each one gets a note on stderr (`Dockerfile:4: RUN pip install -r
-reads requirements.txt`). Only a strict subset is read: a final stage built `FROM` an image (not an earlier stage),
-`WORKDIR` with a literal path, plain `COPY SRC... DEST` (`--chown`, `--chmod` and `--link` are fine), and `RUN` lines
-that are exactly `pip install -r FILE` or `python -m pip install -r FILE` (`--no-cache-dir` is fine). Anything else
-that may install Python packages or put `FILE` in the image is an error naming its line: another way of running pip,
-uv, Poetry and the like (`&&`, variables, `--mount`, a heredoc), `ADD`, `COPY --from`, globs, `SHELL`, an `ENV` setting
-`PIP_` or `UV_` variables, a `.dockerignore`, or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile`
-reads only the image.
+compiling anything?" is one command (add `--deps` for what they pull in). `FILE` is followed back through `WORKDIR` and
+`COPY` to a file in the build context, taken to be the Dockerfile's folder, and each one gets a note on stderr
+(`Dockerfile:4: RUN pip install -r reads requirements.txt`). `[tool.wheelgap]` and `.python-version` are read from the
+Dockerfile's folder too. Only a strict subset is read:
+
+- a final stage built `FROM` an image, not an earlier stage;
+- `WORKDIR` with a literal path;
+- plain `COPY SRC... DEST` from the build context (`--chown`, `--chmod` and `--link` are fine);
+- `RUN` lines that are exactly `pip install -r FILE` or `python -m pip install -r FILE` (`--no-cache-dir` is fine),
+  or only system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
+  and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`).
+
+Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`
+holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc, `uv pip`), `ADD`,
+`COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a copied `pip.conf`, a
+`.dockerignore`, or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
 
 ### `--build-arg` {#build-arg}
 

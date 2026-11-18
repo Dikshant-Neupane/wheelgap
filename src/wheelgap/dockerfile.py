@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import posixpath
 import re
 from collections import deque
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
+from .sources import _abbreviated_include
 from .targets import ALPINE_MUSL, DEBIAN_GLIBC
 
 # Debian release an official python X.Y tag that names none (python:3.13, python:3.13-slim) is built on, per Python.
@@ -953,18 +955,20 @@ def read_dockerfile(path: Path, build_args: Mapping[str, str] | None = None) -> 
 
 
 # --dockerfile-inputs: the requirements files the final stage installs, read from a strict subset of instructions
-# (see dockerfile_requirements). Anything else that may install Python packages is an error naming its line.
-_INSTALLER_RE = re.compile(
-    r"(?<![\w.-])(?:pip[0-9.]*|pip-sync|pipx|pipenv|uv|poetry|pdm|conda|mamba|micromamba|easy_install|setup\.py)"
-    r"(?![\w-])",
-    re.ASCII,
-)
+# (see dockerfile_requirements). Anything else that may change what pip installs is an error naming its line.
 _PLAIN_ARGS_RE = re.compile(r"[A-Za-z0-9_./:=, \t-]*", re.ASCII)  # no quotes, $, escapes, globs, # or shell operators
 _PIP_RE = re.compile(r"pip(?:3(?:\.\d+)?)?", re.ASCII)
 _PYTHON_RE = re.compile(r"python(?:3(?:\.\d+)?)?", re.ASCII)
 _COPY_FLAG_RE = re.compile(r"--(?:chown=[\w.:-]+|chmod=[0-7]{3,4}|link)", re.ASCII)
 _INCLUDE_RE = re.compile(r"^[ \t]*(?:-[rc]|--requirement|--constraint)", re.MULTILINE)
 _PLAIN = "no quotes, variables, escapes, globs, comments or shell operators"
+# RUN lines other than `pip install -r FILE` that are read as not changing what pip installs: system package managers
+# and a few file-mode commands, joined by &&, with rm only under the package caches.
+_SYSTEM_COMMANDS = {"apt-get", "apt", "apk", "yum", "dnf", "microdnf", "useradd", "adduser", "groupadd", "addgroup"}
+_SYSTEM_COMMANDS |= {"mkdir", "chown", "chmod", "rm"}
+_SYSTEM_ARGS_RE = re.compile(r"[A-Za-z0-9_./:=,+*& \t-]*", re.ASCII)
+_RM_PATHS = ("/var/lib/apt/lists/", "/var/cache/", "/root/.cache/")
+_PIP_CONFIG = ("/etc/pip.conf", "/etc/xdg/pip/", "/root/.config/pip/", "/root/.pip/")
 
 
 @dataclass(frozen=True)
@@ -1035,14 +1039,39 @@ def _copied_file(copy: _Copy, target: str, context: Path) -> Path | None:
                 )
         elif target.startswith(copy.dest.rstrip("/") + "/"):
             found = host / posixpath.relpath(target, copy.dest)
-            if found.is_file() and not found.is_symlink() and found.resolve().is_relative_to(root):
+            if os.path.lexists(found) and (found.is_symlink() or not found.resolve().is_relative_to(root)):
+                raise DockerfileError(
+                    f"line {copy.line}: {found.relative_to(context)} is a symlink, "
+                    "which --dockerfile-inputs doesn't read"
+                )
+            if found.is_file():
                 return found
     return None
 
 
+def _system_command(args: str) -> bool:
+    """Whether a RUN is only system package commands (see _SYSTEM_COMMANDS), which don't change what pip installs."""
+    if args.startswith(("--", "[")) or not _SYSTEM_ARGS_RE.fullmatch(args):
+        return False
+    for command in args.split("&&"):
+        words = command.split()
+        if not words or "&" in command or words[0] not in _SYSTEM_COMMANDS:
+            return False
+        if words[0] == "rm":
+            paths = [word for word in words[1:] if not word.startswith("-")]
+            if not all(path.startswith(_RM_PATHS) and ".." not in path for path in paths):
+                return False
+        elif "*" in command:
+            return False
+    return True
+
+
 def _pip_install_files(number: int, args: str) -> list[str]:
     """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`)."""
-    unread = "may install Python packages, but --dockerfile-inputs only reads `RUN pip install -r FILE`"
+    unread = (
+        "only `RUN pip install -r FILE` and system package commands (apt-get, apk, dnf...) are read by "
+        "--dockerfile-inputs, and this RUN may change what pip installs"
+    )
     if args.startswith("--"):
         raise DockerfileError(f"line {number}: RUN flags such as --mount aren't read by --dockerfile-inputs")
     if args.startswith("[") or "<<" in args:
@@ -1075,16 +1104,16 @@ def _pip_install_files(number: int, args: str) -> list[str]:
     return files
 
 
-def dockerfile_requirements(path: Path) -> list[tuple[int, Path]]:
+def dockerfile_requirements(path: Path, build_args: Mapping[str, str] | None = None) -> list[tuple[int, Path]]:
     """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage.
 
     FILE is followed back through the WORKDIR and COPY instructions before it to a file in the build context, taken
     to be the Dockerfile's folder. Only a strict subset is read: a final stage built FROM an image (not an earlier
     stage), WORKDIR with a literal path, plain `COPY SRC... DEST` from the build context, and RUN lines that are
-    exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir). Anything else that may install
-    Python packages or put FILE in the image (a RUN using pip, uv, poetry and the like in any other way, ADD, COPY
-    --from, SHELL, an ENV setting PIP_ or UV_ variables, a .dockerignore, a nested -r or -c) is a DockerfileError
-    naming its line, never a guess.
+    exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir) or only system package commands
+    (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in the image (any other RUN, ADD,
+    COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a .dockerignore, a nested -r
+    or -c) is a DockerfileError naming its line, never a guess.
     """
     try:
         text = path.read_bytes().decode("utf-8-sig")
@@ -1093,7 +1122,7 @@ def dockerfile_requirements(path: Path) -> list[tuple[int, Path]]:
         raise DockerfileError(f"{path}: not UTF-8 (byte {byte} at offset {e.start}), pass -p/-t instead") from None
     context = path.parent
     try:
-        return _dockerfile_requirements(text, context, path.name)
+        return _dockerfile_requirements(text, context, path.name, build_args)
     except DockerfileError as e:
         number, _, message = str(e).removeprefix("line ").partition(": ")
         if number.isdecimal():  # `path:line: message`, as editors and CI logs link it
@@ -1101,7 +1130,9 @@ def dockerfile_requirements(path: Path) -> list[tuple[int, Path]]:
         raise DockerfileError(f"{path}: {e}") from None
 
 
-def _dockerfile_requirements(text: str, context: Path, name: str) -> list[tuple[int, Path]]:
+def _dockerfile_requirements(
+    text: str, context: Path, name: str, build_args: Mapping[str, str] | None
+) -> list[tuple[int, Path]]:
     for ignore in (context / ".dockerignore", context / f"{name}.dockerignore"):
         if ignore.exists():
             raise DockerfileError(
@@ -1113,9 +1144,9 @@ def _dockerfile_requirements(text: str, context: Path, name: str) -> list[tuple[
     froms, _ = _parse_froms(text, instructions=instructions)
     if not froms:
         raise DockerfileError("no FROM line found")
-    stages = {m.group(1).lower() for _, args in froms[:-1] if (m := re.search(r"[ \t](?i:AS)[ \t]+(\S+)\s*$", args))}
     final_line = froms[-1][0]
-    if _split_from(froms[-1][1])[0] in stages:
+    # The FROM that names the final image: an earlier one if the final stage builds on a stage (`FROM ${BASE}` too).
+    if _final_from(text, build_args)[2] != final_line:
         raise DockerfileError(
             f"line {final_line}: the final stage builds on an earlier stage; --dockerfile-inputs only reads a final "
             "stage built FROM an image"
@@ -1140,14 +1171,17 @@ def _dockerfile_requirements(text: str, context: Path, name: str) -> list[tuple[
             if workdir is not None:
                 _add_dir(dirs, workdir)
         elif keyword == "COPY":
-            copies.append(_read_copy(number, args, workdir, dirs, context))
+            copies.append(copy := _read_copy(number, args, workdir, dirs, context))
+            names = [posixpath.basename(rel) for rel, _, _ in copy.sources]
+            if any(n in ("pip.conf", "pip.ini") for n in names) or (copy.dest + "/").startswith(_PIP_CONFIG):
+                run_error = f"line {number}: a pip config file may change what pip installs"
         elif keyword == "ADD":
             copies.append(_Copy(number, (), "", False, "ADD isn't read by --dockerfile-inputs, use COPY"))
         elif keyword == "SHELL":
             run_error = f"line {number}: SHELL changes how RUN lines run, which --dockerfile-inputs doesn't read"
-        elif keyword == "ENV" and re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
-            run_error = f"line {number}: an ENV setting PIP_ or UV_ variables changes what pip installs"
-        elif keyword == "RUN" and (_INSTALLER_RE.search(args) or "<<" in args):
+        elif keyword in ("ENV", "ARG") and re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
+            run_error = f"line {number}: an {keyword} setting PIP_ or UV_ variables changes what pip installs"
+        elif keyword == "RUN" and not _system_command(args):
             files = _pip_install_files(number, args)
             if run_error:
                 raise DockerfileError(run_error)
@@ -1171,7 +1205,8 @@ def _dockerfile_requirements(text: str, context: Path, name: str) -> list[tuple[
                     raise DockerfileError(
                         f"line {number}: {target} isn't copied from the build context by a COPY before this line"
                     )
-                if _INCLUDE_RE.search(host.read_text(encoding="utf-8", errors="replace")):
+                lines = host.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+                if any(_INCLUDE_RE.match(line) or _abbreviated_include(line.strip() or "x") for line in lines):
                     raise DockerfileError(
                         f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
                     )
