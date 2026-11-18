@@ -41,7 +41,7 @@ from .check import (
 from .codequality import write_codequality
 from .constraints import write_constraints
 from .deps import Resolver, pinned_complete, resolve_deps
-from .dockerfile import DockerfileError, read_dockerfile
+from .dockerfile import DockerfileError, dockerfile_requirements, read_dockerfile
 from .github import github_annotations
 from .install_log import failed_builds, log_source, read_log
 from .junit import write_junit
@@ -196,6 +196,12 @@ def make_parser() -> argparse.ArgumentParser:
         "--dockerfile",
         metavar="PATH",
         help="take -p/-t (and --glibc/--musl) from the final stage's image, e.g. FROM python:3.13-alpine",
+    )
+    p.add_argument(
+        "--dockerfile-inputs",
+        action="store_true",
+        help="with --dockerfile, check the requirements files its final stage installs with RUN pip install -r FILE "
+        "(a strict subset of Dockerfiles: anything else that may install packages is an error naming its line)",
     )
     p.add_argument(
         "--build-arg",
@@ -1824,7 +1830,24 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         parser.error("--notes only adds to --explain; pass --explain too")
     if args.dist and args.inputs:
         parser.error("--dist DIR takes no other inputs")
+    if args.dockerfile_inputs:
+        if not args.dockerfile:
+            parser.error("--dockerfile-inputs reads what --dockerfile installs; pass --dockerfile too")
+        given = [
+            flag for flag, value in (("INPUT", args.inputs), ("--dist", args.dist), ("--deps", args.deps)) if value
+        ]
+        if args.from_log is not None:
+            given.append("--from-log")
+        if given:
+            parser.error(
+                "--dockerfile-inputs takes the packages from the Dockerfile, "
+                f"so it can't be used with {', '.join(given)}"
+            )
+    installs: list[tuple[int, Path]] = []
     try:
+        if args.dockerfile_inputs:
+            installs = dockerfile_requirements(Path(args.dockerfile))
+            args.inputs = [str(requirements) for _, requirements in installs]
         if args.clear_cache:
             folder, count = cache.clear()
             print(f"wheelgap: removed {count} cached lookup{'' if count == 1 else 's'} from {folder}", file=sys.stderr)
@@ -1852,6 +1875,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             # The image beats pyproject.toml; flags still win.
             image = read_dockerfile(Path(args.dockerfile), build_args)
             if not quiet:
+                for line, requirements in installs:
+                    print(
+                        f"wheelgap: note: {args.dockerfile}:{line}: RUN pip install -r reads {requirements}",
+                        file=sys.stderr,
+                    )
                 for name, value in image.build_args:
                     if name in image.given_args:
                         note = f"FROM uses --build-arg {name}={value}"

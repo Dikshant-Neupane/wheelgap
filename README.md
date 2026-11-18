@@ -81,6 +81,9 @@ wheelgap --dist dist -p 3.13 -t win-arm64,linux-aarch64
 # (a global `ARG PYTHON_VERSION=3.13` before the first FROM works too)
 wheelgap --dockerfile Dockerfile
 
+# ...and check what it installs with RUN pip install -r requirements.txt
+wheelgap --dockerfile Dockerfile --dockerfile-inputs
+
 # Machine-readable, for scripts and CI
 wheelgap --json > wheelgap.json
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import posixpath
 import re
 from collections import deque
 from collections.abc import Mapping
@@ -611,8 +612,12 @@ def _from_instructions(text: str) -> list[tuple[int, str]]:
     return _parse_froms(text)[0]
 
 
-def _parse_froms(text: str, build_args: Mapping[str, str] | None = None) -> tuple[list[tuple[int, str]], _GlobalArgs]:
+def _parse_froms(
+    text: str, build_args: Mapping[str, str] | None = None, instructions: list[tuple[int, str]] | None = None
+) -> tuple[list[tuple[int, str]], _GlobalArgs]:
     """(line number, arguments) of every FROM instruction in order, the line being where the instruction starts.
+
+    If `instructions` is given, every instruction is added to it as (line number, instruction), continuations joined.
 
     Heredoc bodies (`RUN <<EOF` ... `EOF`) are skipped, so a line in one is never read as an instruction.
     Follows Parse in BuildKit's parser.go at commit cedaeca8850a2bb536bbd1db72419f3cf491bdb5: each body starts
@@ -639,6 +644,8 @@ def _parse_froms(text: str, build_args: Mapping[str, str] | None = None) -> tupl
     heredocs: deque[tuple[str, bool]] = deque()  # (delimiter, strip_tabs) of the bodies still to skip, in order
 
     def finish(instruction: str, joined: bool, line_number: int) -> None:
+        if instructions is not None:
+            instructions.append((line_number, instruction))
         # Docker splits the keyword off on ASCII whitespace only, so `FROM<U+00A0>python` isn't a FROM to it.
         words = re.split(r"[ \t\v\f\r]+", instruction, maxsplit=1)
         if words[0].upper() != "FROM" and re.match(r"(?i)FROM\s", words[0]):
@@ -943,3 +950,232 @@ def read_dockerfile(path: Path, build_args: Mapping[str, str] | None = None) -> 
     given = frozenset(name for name in used if name in (build_args or {}))
     undeclared = tuple(name for name in build_args or {} if name not in global_args.declared)
     return replace(target, build_args=tuple(used.items()), given_args=given, undeclared_args=undeclared)
+
+
+# --dockerfile-inputs: the requirements files the final stage installs, read from a strict subset of instructions
+# (see dockerfile_requirements). Anything else that may install Python packages is an error naming its line.
+_INSTALLER_RE = re.compile(
+    r"(?<![\w.-])(?:pip[0-9.]*|pip-sync|pipx|pipenv|uv|poetry|pdm|conda|mamba|micromamba|easy_install|setup\.py)"
+    r"(?![\w-])",
+    re.ASCII,
+)
+_PLAIN_ARGS_RE = re.compile(r"[A-Za-z0-9_./:=, \t-]*", re.ASCII)  # no quotes, $, escapes, globs, # or shell operators
+_PIP_RE = re.compile(r"pip(?:3(?:\.\d+)?)?", re.ASCII)
+_PYTHON_RE = re.compile(r"python(?:3(?:\.\d+)?)?", re.ASCII)
+_COPY_FLAG_RE = re.compile(r"--(?:chown=[\w.:-]+|chmod=[0-7]{3,4}|link)", re.ASCII)
+_INCLUDE_RE = re.compile(r"^[ \t]*(?:-[rc]|--requirement|--constraint)", re.MULTILINE)
+_PLAIN = "no quotes, variables, escapes, globs, comments or shell operators"
+
+
+@dataclass(frozen=True)
+class _Copy:
+    line: int
+    sources: tuple[tuple[str, Path, bool], ...]  # (path in the build context, path on disk, is a folder)
+    dest: str  # absolute and normalised
+    into: bool  # the sources land inside dest: a / at its end, several sources, a folder, or dest a known folder
+    error: str | None = None  # why wheelgap can't tell what this instruction puts in the image
+
+
+def _add_dir(dirs: set[str], folder: str) -> None:
+    while folder not in dirs:
+        dirs.add(folder)
+        folder = posixpath.dirname(folder)
+
+
+def _read_copy(number: int, args: str, workdir: str | None, dirs: set[str], context: Path) -> _Copy:
+    def unread(error: str) -> _Copy:
+        return _Copy(number, (), "", False, error)
+
+    if args.lstrip().startswith("[") or not _PLAIN_ARGS_RE.fullmatch(args):
+        return unread(f"only a plain `COPY SRC... DEST` is read by --dockerfile-inputs ({_PLAIN}, no JSON form)")
+    words = args.split()
+    while words and words[0].startswith("--"):
+        if not _COPY_FLAG_RE.fullmatch(flag := words.pop(0)):
+            return unread(f"COPY {flag} isn't read by --dockerfile-inputs (only --chown, --chmod and --link are)")
+    if len(words) < 2:
+        return unread("COPY needs a source and a destination")
+    *names, dest = words
+    sources = []
+    root = context.resolve()
+    for name in names:
+        rel = posixpath.normpath(name)
+        if name.startswith("/") or rel == ".." or rel.startswith("../"):
+            return unread(f"COPY {name}: only paths inside the build context (the Dockerfile's folder) are read")
+        host = context / rel
+        if not host.exists():
+            return unread(f"COPY {name}: not found in the build context (the Dockerfile's folder)")
+        if not host.resolve().is_relative_to(root):
+            return unread(f"COPY {name}: a symlink out of the build context isn't read by --dockerfile-inputs")
+        sources.append((rel, host, host.is_dir()))
+    if dest.startswith("/"):
+        target = posixpath.normpath(dest)
+    elif workdir is None:
+        return unread(f"COPY to {dest}: a relative destination needs a WORKDIR with an absolute path before it")
+    else:
+        target = posixpath.normpath(posixpath.join(workdir, dest))
+    into = dest.endswith("/") or len(sources) > 1 or any(is_dir for _, _, is_dir in sources) or target in dirs
+    if into:
+        _add_dir(dirs, target)
+    return _Copy(number, tuple(sources), target, into)
+
+
+def _copied_file(copy: _Copy, target: str, context: Path) -> Path | None:
+    """The file in the build context `copy` puts at `target` in the image, or None if it puts none there."""
+    root = context.resolve()
+    for rel, host, is_dir in reversed(copy.sources):  # a later source overwrites an earlier one
+        if not is_dir:
+            if copy.into and target == posixpath.join(copy.dest, posixpath.basename(rel)):
+                return host
+            if not copy.into and target == copy.dest:
+                return host
+            if not copy.into and target == posixpath.join(copy.dest, posixpath.basename(rel)):
+                raise DockerfileError(
+                    f"line {copy.line}: can't tell whether {copy.dest} is a folder in the image: "
+                    f"end the destination with / (or set WORKDIR {copy.dest} first)"
+                )
+        elif target.startswith(copy.dest.rstrip("/") + "/"):
+            found = host / posixpath.relpath(target, copy.dest)
+            if found.is_file() and not found.is_symlink() and found.resolve().is_relative_to(root):
+                return found
+    return None
+
+
+def _pip_install_files(number: int, args: str) -> list[str]:
+    """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`)."""
+    unread = "may install Python packages, but --dockerfile-inputs only reads `RUN pip install -r FILE`"
+    if args.startswith("--"):
+        raise DockerfileError(f"line {number}: RUN flags such as --mount aren't read by --dockerfile-inputs")
+    if args.startswith("[") or "<<" in args:
+        raise DockerfileError(f"line {number}: {unread} in shell form, without a heredoc")
+    if not _PLAIN_ARGS_RE.fullmatch(args):
+        raise DockerfileError(f"line {number}: {unread} ({_PLAIN})")
+    words = args.split()
+    if words[:1] and _PIP_RE.fullmatch(words[0]):
+        rest = words[1:]
+    elif len(words) >= 3 and _PYTHON_RE.fullmatch(words[0]) and words[1:3] == ["-m", "pip"]:
+        rest = words[3:]
+    else:
+        raise DockerfileError(f"line {number}: {unread}")
+    if rest[:1] != ["install"]:
+        raise DockerfileError(f"line {number}: {unread}")
+    files: list[str] = []
+    i = 1
+    while i < len(rest):
+        if rest[i] in ("-r", "--requirement") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            files.append(rest[i + 1])
+            i += 2
+        elif rest[i] == "--no-cache-dir":
+            i += 1
+        else:
+            raise DockerfileError(
+                f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads -r FILE and --no-cache-dir"
+            )
+    if not files:
+        raise DockerfileError(f"line {number}: {unread}")
+    return files
+
+
+def dockerfile_requirements(path: Path) -> list[tuple[int, Path]]:
+    """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage.
+
+    FILE is followed back through the WORKDIR and COPY instructions before it to a file in the build context, taken
+    to be the Dockerfile's folder. Only a strict subset is read: a final stage built FROM an image (not an earlier
+    stage), WORKDIR with a literal path, plain `COPY SRC... DEST` from the build context, and RUN lines that are
+    exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir). Anything else that may install
+    Python packages or put FILE in the image (a RUN using pip, uv, poetry and the like in any other way, ADD, COPY
+    --from, SHELL, an ENV setting PIP_ or UV_ variables, a .dockerignore, a nested -r or -c) is a DockerfileError
+    naming its line, never a guess.
+    """
+    try:
+        text = path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        byte = f"0x{e.object[e.start]:02x}"
+        raise DockerfileError(f"{path}: not UTF-8 (byte {byte} at offset {e.start}), pass -p/-t instead") from None
+    context = path.parent
+    try:
+        return _dockerfile_requirements(text, context, path.name)
+    except DockerfileError as e:
+        number, _, message = str(e).removeprefix("line ").partition(": ")
+        if number.isdecimal():  # `path:line: message`, as editors and CI logs link it
+            raise DockerfileError(f"{path}:{number}: {message}") from None
+        raise DockerfileError(f"{path}: {e}") from None
+
+
+def _dockerfile_requirements(text: str, context: Path, name: str) -> list[tuple[int, Path]]:
+    for ignore in (context / ".dockerignore", context / f"{name}.dockerignore"):
+        if ignore.exists():
+            raise DockerfileError(
+                f"{ignore.name} may leave files out of the build context: --dockerfile-inputs doesn't read it yet"
+            )
+    if _escape_char([line.rstrip("\r") for line in text.split("\n")]) != "\\":
+        raise DockerfileError("--dockerfile-inputs only reads Dockerfiles with the default \\ escape")
+    instructions: list[tuple[int, str]] = []
+    froms, _ = _parse_froms(text, instructions=instructions)
+    if not froms:
+        raise DockerfileError("no FROM line found")
+    stages = {m.group(1).lower() for _, args in froms[:-1] if (m := re.search(r"[ \t](?i:AS)[ \t]+(\S+)\s*$", args))}
+    final_line = froms[-1][0]
+    if _split_from(froms[-1][1])[0] in stages:
+        raise DockerfileError(
+            f"line {final_line}: the final stage builds on an earlier stage; --dockerfile-inputs only reads a final "
+            "stage built FROM an image"
+        )
+    start = max(i for i, (number, _) in enumerate(instructions) if number == final_line)
+    workdir: str | None = None
+    workdir_error: str | None = None
+    run_error: str | None = None  # an instruction that changes how a later RUN installs
+    dirs = {"/"}
+    copies: list[_Copy] = []
+    found: dict[Path, int] = {}
+    for number, instruction in instructions[start + 1 :]:
+        parts = re.split(r"[ \t\v\f\r]+", instruction, maxsplit=1)
+        keyword, args = parts[0].upper(), (parts[1].strip() if len(parts) > 1 else "")
+        if keyword == "WORKDIR":
+            if not re.fullmatch(r"[A-Za-z0-9_./-]+", args, re.ASCII):
+                workdir, workdir_error = None, f"line {number}: WORKDIR {args}: only a literal path is read ({_PLAIN})"
+            elif args.startswith("/"):
+                workdir, workdir_error = posixpath.normpath(args), None
+            elif workdir is not None:
+                workdir = posixpath.normpath(posixpath.join(workdir, args))
+            if workdir is not None:
+                _add_dir(dirs, workdir)
+        elif keyword == "COPY":
+            copies.append(_read_copy(number, args, workdir, dirs, context))
+        elif keyword == "ADD":
+            copies.append(_Copy(number, (), "", False, "ADD isn't read by --dockerfile-inputs, use COPY"))
+        elif keyword == "SHELL":
+            run_error = f"line {number}: SHELL changes how RUN lines run, which --dockerfile-inputs doesn't read"
+        elif keyword == "ENV" and re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
+            run_error = f"line {number}: an ENV setting PIP_ or UV_ variables changes what pip installs"
+        elif keyword == "RUN" and (_INSTALLER_RE.search(args) or "<<" in args):
+            files = _pip_install_files(number, args)
+            if run_error:
+                raise DockerfileError(run_error)
+            for file in files:
+                if file.startswith("/"):
+                    target = posixpath.normpath(file)
+                elif workdir is None:
+                    raise DockerfileError(
+                        workdir_error
+                        or f"line {number}: -r {file} is relative, but no WORKDIR with an absolute path comes before it"
+                    )
+                else:
+                    target = posixpath.normpath(posixpath.join(workdir, file))
+                host = None
+                for copy in reversed(copies):
+                    if copy.error:
+                        raise DockerfileError(f"line {copy.line}: {copy.error}")
+                    if (host := _copied_file(copy, target, context)) is not None:
+                        break
+                if host is None:
+                    raise DockerfileError(
+                        f"line {number}: {target} isn't copied from the build context by a COPY before this line"
+                    )
+                if _INCLUDE_RE.search(host.read_text(encoding="utf-8", errors="replace")):
+                    raise DockerfileError(
+                        f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
+                    )
+                found.setdefault(host, number)
+    if not found:
+        raise DockerfileError(f"the final stage (line {final_line}) has no `RUN pip install -r FILE`")
+    return [(number, host) for host, number in found.items()]

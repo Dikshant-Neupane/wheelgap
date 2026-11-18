@@ -9,6 +9,7 @@ from wheelgap.dockerfile import (
     ImageTarget,
     _heredocs,
     _syntax_directive,
+    dockerfile_requirements,
     last_from,
     parse_from,
     read_dockerfile,
@@ -1009,3 +1010,174 @@ def test_a_build_arg_doesnt_make_a_non_ascii_arg_readable(tmp_path):
     path.write_text("ARG B=3.12\nARG A=1\u00a0B=3.13\nFROM python:${B}-slim\n", encoding="utf-8")
     with pytest.raises(DockerfileError, match="non-ASCII characters in an ARG aren't supported"):
         read_dockerfile(path, {"A": "3"})
+
+
+def _context(tmp_path, dockerfile, files=("requirements.txt",)):
+    for name in files:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("purewheel==3.1\n", encoding="utf-8")
+    path = tmp_path / "Dockerfile"
+    path.write_text(dockerfile, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "files", "expected"),
+    [
+        # The python image's README: WORKDIR, then the file into it, then pip.
+        (
+            "FROM python:3.13\nWORKDIR /usr/src/app\nCOPY requirements.txt ./\n"
+            "RUN pip install --no-cache-dir -r requirements.txt\n",
+            ["requirements.txt"],
+            [(4, "requirements.txt")],
+        ),
+        # WORKDIR made /app, so the file lands inside it; an absolute -r; python -m pip; a continuation.
+        (
+            "FROM python:3.13-slim\nWORKDIR /app\nCOPY requirements.txt /app\nRUN python3 -m pip install \\\n"
+            "    -r /app/requirements.txt\n",
+            ["requirements.txt"],
+            [(4, "requirements.txt")],
+        ),
+        # A file copied to a new name; a folder's contents; the later COPY of the same path wins.
+        (
+            "FROM python:3.13\nCOPY deps/base.txt /tmp/req.txt\nRUN pip install -r /tmp/req.txt\n",
+            ["deps/base.txt"],
+            [(3, "deps/base.txt")],
+        ),
+        (
+            "FROM python:3.13\nWORKDIR /src\nCOPY . .\nRUN pip3 install -r reqs/prod.txt -r reqs/extra.txt\n",
+            ["reqs/prod.txt", "reqs/extra.txt"],
+            [(4, "reqs/prod.txt"), (4, "reqs/extra.txt")],
+        ),
+        (
+            "FROM python:3.13\nWORKDIR /src\nCOPY a/requirements.txt ./\nCOPY --chown=app:app b/ ./\n"
+            "RUN pip install -r requirements.txt\n",
+            ["a/requirements.txt", "b/requirements.txt"],
+            [(5, "b/requirements.txt")],
+        ),
+        # Earlier stages, other RUN lines and a COPY after the install don't matter.
+        (
+            "FROM node:22 AS assets\nRUN npm ci\nFROM python:3.13\nWORKDIR /app\nRUN apt-get update\n"
+            "COPY requirements.txt .\nRUN pip install -r requirements.txt\nCOPY --from=assets /dist ./dist\n",
+            ["requirements.txt"],
+            [(7, "requirements.txt")],
+        ),
+    ],
+)
+def test_dockerfile_requirements_reads(tmp_path, dockerfile, files, expected):
+    path = _context(tmp_path, dockerfile, files)
+    assert dockerfile_requirements(path) == [(line, tmp_path / name) for line, name in expected]
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "message"),
+    [
+        ("FROM python:3.13\nRUN echo hi\n", "the final stage \\(line 1\\) has no `RUN pip install -r FILE`"),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt && pip check\n",
+            ":4: may install Python packages, but --dockerfile-inputs only reads",
+        ),
+        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install .\n", ":4: pip install \\.: --dockerfile-inputs"),
+        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN uv pip install --system -r requirements.txt\n", ":4: may"),
+        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r $REQS\n", ":4: may install"),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN --mount=type=cache,target=/root/.cache pip install "
+            "-r requirements.txt\n",
+            ":4: RUN flags such as --mount",
+        ),
+        ("FROM python:3.13\nRUN <<EOF\npip install numpy\nEOF\n", ":2: may install Python packages"),
+        ("FROM python:3.13\nCOPY . .\nRUN pip install -r /requirements.txt\n", ":2: COPY to \\.: a relative"),
+        ("FROM python:3.13\nRUN pip install -r requirements.txt\n", ":2: -r requirements.txt is relative"),
+        ("FROM python:3.13\nWORKDIR /app\nRUN pip install -r requirements.txt\n", "isn't copied from the build"),
+        (
+            "FROM python:3.13 AS build\nCOPY . /app\nFROM build\nRUN pip install -r /app/requirements.txt\n",
+            ":3: the final stage builds on an earlier stage",
+        ),
+        (
+            "FROM python:3.13 AS build\nFROM python:3.13\nWORKDIR /app\nCOPY --from=build /app/requirements.txt .\n"
+            "RUN pip install -r requirements.txt\n",
+            ":4: COPY --from=build isn't read",
+        ),
+        ("FROM python:3.13\nWORKDIR /app\nADD . .\nRUN pip install -r requirements.txt\n", ":3: ADD isn't read"),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY *.txt ./\nRUN pip install -r requirements.txt\n",
+            ":3: only a plain `COPY SRC... DEST`",
+        ),
+        (
+            "FROM python:3.13\nCOPY requirements.txt /tmp\nRUN pip install -r /tmp/requirements.txt\n",
+            ":2: can't tell whether /tmp is a folder",
+        ),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY missing.txt ./\nRUN pip install -r missing.txt\n",
+            ":3: COPY missing.txt: not found",
+        ),
+        (
+            "FROM python:3.13\nWORKDIR $HOME\nCOPY . .\nRUN pip install -r requirements.txt\n",
+            ":2: WORKDIR \\$HOME: only a literal path",
+        ),
+        (
+            "FROM python:3.13\nENV PIP_ONLY_BINARY=:all:\nWORKDIR /app\nCOPY . .\n"
+            "RUN pip install -r requirements.txt\n",
+            ":2: an ENV setting PIP_ or UV_",
+        ),
+        (
+            'FROM python:3.13\nSHELL ["/bin/bash", "-c"]\nWORKDIR /app\nCOPY . .\n'
+            "RUN pip install -r requirements.txt\n",
+            ":2: SHELL changes how RUN lines run",
+        ),
+        ("# escape=`\nFROM python:3.13\nRUN pip install -r C:/r.txt\n", "default \\\\ escape"),
+    ],
+)
+def test_dockerfile_requirements_refuses(tmp_path, dockerfile, message):
+    path = _context(tmp_path, dockerfile)
+    with pytest.raises(DockerfileError, match=message):
+        dockerfile_requirements(path)
+
+
+def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_path):
+    path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n")
+    (tmp_path / "requirements.txt").write_text("-r base.txt\npurewheel==3.1\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
+        dockerfile_requirements(path)
+    (tmp_path / ".dockerignore").write_text("*.txt\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=r"\.dockerignore may leave files out of the build context"):
+        dockerfile_requirements(path)
+
+
+def test_cli_dockerfile_inputs_checks_what_the_image_installs(tmp_path, capsys, fake_pypi):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13-alpine\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n",
+    )
+    (tmp_path / "requirements.txt").write_text("purewheel==3.1\nnowheels==0.9\n", encoding="utf-8")
+    code = main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"])
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert [(t["python"], t["platform"]) for t in data["targets"]] == [("3.13", "musl-x86_64")]
+    assert sorted(p["name"] for p in data["packages"]) == ["nowheels", "purewheel"]
+    assert code == 1  # nowheels has no wheel
+    note = f"wheelgap: note: {path}:4: RUN pip install -r reads {tmp_path / 'requirements.txt'}\n"
+    assert note in captured.err
+
+
+def test_plain_dockerfile_still_ignores_what_the_image_installs(tmp_path, capsys, fake_pypi):
+    path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n")
+    (tmp_path / "requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    assert main(["purewheel", "--dockerfile", str(path), "--json"]) == 0
+    captured = capsys.readouterr()
+    assert [p["name"] for p in json.loads(captured.out)["packages"]] == ["purewheel"]
+    assert "RUN pip install" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("argv", "error"),
+    [
+        (["--dockerfile-inputs"], "--dockerfile-inputs reads what --dockerfile installs; pass --dockerfile too"),
+        (["purewheel", "--dockerfile", "Dockerfile", "--dockerfile-inputs"], "can't be used with INPUT"),
+    ],
+)
+def test_cli_dockerfile_inputs_usage_errors(capsys, argv, error):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert error in capsys.readouterr().err
