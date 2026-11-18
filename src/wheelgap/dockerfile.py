@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
-from .sources import _abbreviated_include
+from .sources import _COMMENT_RE, _abbreviated_include, _join_continued_lines
 from .targets import ALPINE_MUSL, DEBIAN_GLIBC
 
 # Debian release an official python X.Y tag that names none (python:3.13, python:3.13-slim) is built on, per Python.
@@ -960,7 +960,6 @@ _PLAIN_ARGS_RE = re.compile(r"[A-Za-z0-9_./:=, \t-]*", re.ASCII)  # no quotes, $
 _PIP_RE = re.compile(r"pip(?:3(?:\.\d+)?)?", re.ASCII)
 _PYTHON_RE = re.compile(r"python(?:3(?:\.\d+)?)?", re.ASCII)
 _COPY_FLAG_RE = re.compile(r"--(?:chown=[\w.:-]+|chmod=[0-7]{3,4}|link)", re.ASCII)
-_INCLUDE_RE = re.compile(r"^[ \t]*(?:-[rc]|--requirement|--constraint)", re.MULTILINE)
 _PLAIN = "no quotes, variables, escapes, globs, comments or shell operators"
 # RUN lines other than `pip install -r FILE` that are read as not changing what pip installs: system package managers
 # and a few file-mode commands, joined by &&, with rm only under the package caches.
@@ -969,6 +968,7 @@ _SYSTEM_COMMANDS |= {"mkdir", "chown", "chmod", "rm"}
 _SYSTEM_ARGS_RE = re.compile(r"[A-Za-z0-9_./:=,+*& \t-]*", re.ASCII)
 _RM_PATHS = ("/var/lib/apt/lists/", "/var/cache/", "/root/.cache/")
 _PIP_CONFIG = ("/etc/pip.conf", "/etc/xdg/pip/", "/root/.config/pip/", "/root/.pip/")
+_PIP_CONFIG_NAMES = ("pip.conf", "pip.ini")
 
 
 @dataclass(frozen=True)
@@ -1049,6 +1049,38 @@ def _copied_file(copy: _Copy, target: str, context: Path) -> Path | None:
     return None
 
 
+def _copies_pip_config(copy: _Copy) -> bool:
+    """Whether `copy` may put a file named pip.conf or pip.ini anywhere in the image. pip reads one from /etc,
+    /etc/xdg/pip, sys.prefix (/usr/local) and the home of whichever user runs it, so its name is what counts."""
+    for rel, host, is_dir in copy.sources:
+        if is_dir:
+            for _, dirnames, filenames in os.walk(host):
+                if any(name.lower() in _PIP_CONFIG_NAMES for name in (*dirnames, *filenames)):
+                    return True
+        # Not knowing whether dest is a folder in the image, either name may be the one the file gets.
+        elif any(posixpath.basename(name).lower() in _PIP_CONFIG_NAMES for name in (rel, copy.dest)):
+            return True
+    return (copy.dest + "/").startswith(_PIP_CONFIG)
+
+
+def _has_include(text: str) -> bool:
+    """Whether a requirements file has a -r or -c anywhere pip reads one: on a line of options, after other options
+    (`--pre -r base.txt`), over a continuation, or abbreviated (`--req base.txt`)."""
+    for raw in _join_continued_lines(text):
+        line = _COMMENT_RE.split(raw, 1)[0].strip()
+        if line.startswith("#"):
+            continue
+        for token in line.split():
+            option = token.split("=", 1)[0]
+            if (
+                (token.startswith(("-r", "-c")) and not token.startswith("--"))
+                or option in ("--requirement", "--constraint")
+                or _abbreviated_include(token)
+            ):
+                return True
+    return False
+
+
 def _system_command(args: str) -> bool:
     """Whether a RUN is only system package commands (see _SYSTEM_COMMANDS), which don't change what pip installs."""
     if args.startswith(("--", "[")) or not _SYSTEM_ARGS_RE.fullmatch(args):
@@ -1112,8 +1144,8 @@ def dockerfile_requirements(path: Path, build_args: Mapping[str, str] | None = N
     stage), WORKDIR with a literal path, plain `COPY SRC... DEST` from the build context, and RUN lines that are
     exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir) or only system package commands
     (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in the image (any other RUN, ADD,
-    COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a .dockerignore, a nested -r
-    or -c) is a DockerfileError naming its line, never a guess.
+    COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a .dockerignore, a `# syntax=`
+    frontend other than docker/dockerfile, a nested -r or -c) is a DockerfileError naming its line, never a guess.
     """
     try:
         text = path.read_bytes().decode("utf-8-sig")
@@ -1138,8 +1170,13 @@ def _dockerfile_requirements(
             raise DockerfileError(
                 f"{ignore.name} may leave files out of the build context: --dockerfile-inputs doesn't read it yet"
             )
-    if _escape_char([line.rstrip("\r") for line in text.split("\n")]) != "\\":
+    lines = [line.rstrip("\r") for line in text.split("\n")]
+    if _escape_char(lines) != "\\":
         raise DockerfileError("--dockerfile-inputs only reads Dockerfiles with the default \\ escape")
+    if _heredoc_rules(syntax := _syntax_directive(lines)) is None:
+        raise DockerfileError(
+            f"# syntax={syntax}: --dockerfile-inputs only reads Dockerfiles for docker/dockerfile frontends"
+        )
     instructions: list[tuple[int, str]] = []
     froms, _ = _parse_froms(text, instructions=instructions)
     if not froms:
@@ -1172,8 +1209,7 @@ def _dockerfile_requirements(
                 _add_dir(dirs, workdir)
         elif keyword == "COPY":
             copies.append(copy := _read_copy(number, args, workdir, dirs, context))
-            names = [posixpath.basename(rel) for rel, _, _ in copy.sources]
-            if any(n in ("pip.conf", "pip.ini") for n in names) or (copy.dest + "/").startswith(_PIP_CONFIG):
+            if _copies_pip_config(copy):
                 run_error = f"line {number}: a pip config file may change what pip installs"
         elif keyword == "ADD":
             copies.append(_Copy(number, (), "", False, "ADD isn't read by --dockerfile-inputs, use COPY"))
@@ -1205,8 +1241,7 @@ def _dockerfile_requirements(
                     raise DockerfileError(
                         f"line {number}: {target} isn't copied from the build context by a COPY before this line"
                     )
-                lines = host.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-                if any(_INCLUDE_RE.match(line) or _abbreviated_include(line.strip() or "x") for line in lines):
+                if _has_include(host.read_text(encoding="utf-8-sig", errors="replace")):
                     raise DockerfileError(
                         f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
                     )

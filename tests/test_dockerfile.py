@@ -1153,6 +1153,12 @@ def test_dockerfile_requirements_reads(tmp_path, dockerfile, files, expected):
             ":2: SHELL changes how RUN lines run",
         ),
         ("# escape=`\nFROM python:3.13\nRUN pip install -r C:/r.txt\n", "default \\\\ escape"),
+        # A frontend other than docker/dockerfile may read COPY and RUN differently.
+        (
+            "# syntax=example.com/frontend:1\nFROM python:3.13\nWORKDIR /app\nCOPY . .\n"
+            "RUN pip install -r requirements.txt\n",
+            "# syntax=example.com/frontend:1: --dockerfile-inputs only reads",
+        ),
     ],
 )
 def test_dockerfile_requirements_refuses(tmp_path, dockerfile, message):
@@ -1164,7 +1170,15 @@ def test_dockerfile_requirements_refuses(tmp_path, dockerfile, message):
 def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_path):
     path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n")
     # pip strips a byte order mark and reads abbreviated options, so these include base.txt too.
-    for text in ("-r base.txt\npurewheel==3.1\n", "\ufeff-r base.txt\n", "purewheel==3.1\n--req base.txt\n"):
+    # pip also reads one after other options on a line, and over a continuation.
+    for text in (
+        "-r base.txt\npurewheel==3.1\n",
+        "\ufeff-r base.txt\n",
+        "purewheel==3.1\n--req base.txt\n",
+        "--pre -r base.txt\npurewheel==3.1\n",
+        "--only-binary :all: --constraint=base.txt\n",
+        "purewheel==3.1\n--pre \\\n-cbase.txt\n",
+    ):
         (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
         with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
             dockerfile_requirements(path)
@@ -1227,6 +1241,28 @@ def test_dockerfile_requirements_refuses_a_pip_config_file(tmp_path):
         "FROM python:3.13\nCOPY pip.conf /etc/pip.conf\nWORKDIR /app\nCOPY requirements.txt .\n"
         "RUN pip install -r requirements.txt\n",
         ["requirements.txt", "pip.conf"],
+    )
+    with pytest.raises(DockerfileError, match=":2: a pip config file may change what pip installs"):
+        dockerfile_requirements(path)
+
+
+@pytest.mark.parametrize(
+    ("copy", "files"),
+    [
+        # A folder with a pip.conf in it, wherever it lands: /etc, the user's home...
+        ("COPY etc/ /etc/", ["etc/pip.conf"]),
+        ("COPY . /root/", [".config/pip/pip.conf"]),
+        # ...and a file renamed to pip.conf, in sys.prefix or another user's home.
+        ("COPY mirror.conf /usr/local/pip.conf", ["mirror.conf"]),
+        ("COPY mirror.conf /home/app/.config/pip/pip.conf", ["mirror.conf"]),
+        ("COPY mirror.conf /home/app/.pip/PIP.INI", ["mirror.conf"]),
+    ],
+)
+def test_dockerfile_requirements_refuses_a_pip_config_file_by_its_name(tmp_path, copy, files):
+    path = _context(
+        tmp_path,
+        f"FROM python:3.13\n{copy}\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n",
+        ["requirements.txt", *files],
     )
     with pytest.raises(DockerfileError, match=":2: a pip config file may change what pip installs"):
         dockerfile_requirements(path)

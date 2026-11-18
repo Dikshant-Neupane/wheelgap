@@ -84,8 +84,9 @@ Dockerfile's folder too. Only a strict subset is read:
 
 Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`
 holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc, `uv pip`), `ADD`,
-`COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a copied `pip.conf`, a
-`.dockerignore`, or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
+`COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY that puts a file named
+`pip.conf` or `pip.ini` anywhere in the image, a `.dockerignore`, a `# syntax=` frontend other than
+`docker/dockerfile`, or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
 
 ### `--build-arg` {#build-arg}
 
