@@ -2743,6 +2743,76 @@ def test_pyproject_dependency_groups(capsys, fake_pypi, tmp_path, flags, expecte
     assert not any("mylib" in url.lower() for url in fake_pypi)
 
 
+GROUPS_ONLY_PYPROJECT = """\
+[dependency-groups]
+test = ["purewheel==3.1", {include-group = "shared"}]
+shared = ["fastlib==2.0.0"]
+"""
+
+
+@pytest.mark.parametrize("flag", ["--group", "--only-group"])
+def test_pyproject_groups_without_project(capsys, fake_pypi, tmp_path, flag):
+    path = tmp_path / "pyproject.toml"
+    path.write_text(GROUPS_ONLY_PYPROJECT, encoding="utf-8")
+    code, out, err = run(capsys, str(path), "-p", "3.13", "-t", "linux-x86_64", "--json", flag, "test")
+    assert code == 0, err
+    assert {row["name"] for row in json.loads(out)["packages"]} == {"purewheel", "fastlib"}
+
+
+@pytest.mark.parametrize(
+    "text,flags,error",
+    [
+        (GROUPS_ONLY_PYPROJECT, [], "pick one with --group or --only-group: shared, test"),
+        ("[dependency-groups]\n", [], "no groups to select"),
+        (GROUPS_ONLY_PYPROJECT, ["--extra", "test"], "no [project] optional-dependencies"),
+        (GROUPS_ONLY_PYPROJECT, ["--all-extras"], "no [project] optional-dependencies"),
+        (GROUPS_ONLY_PYPROJECT, ["--only-group", "test", "--all-extras"], "no [project] optional-dependencies"),
+        ("[tool.wheelgap]\n", [], "no [project] table"),
+        ('project = "invalid"\n' + GROUPS_ONLY_PYPROJECT, ["--group", "test"], "no [project] table"),
+        (
+            '[tool.poetry.dependencies]\npython = "^3.10"\nnumpy = "*"\n' + GROUPS_ONLY_PYPROJECT,
+            ["--group", "test"],
+            "[tool.poetry.dependencies]",
+        ),
+    ],
+)
+def test_pyproject_groups_without_project_errors(capsys, fake_pypi, tmp_path, text, flags, error):
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text, encoding="utf-8")
+    code, _, err = run(capsys, str(path), "-p", "3.13", "-t", "linux-x86_64", *flags)
+    assert code == 2 and error in err
+    assert not fake_pypi
+
+
+@pytest.mark.parametrize("flag", ["--group", "--only-group"])
+@pytest.mark.parametrize(
+    "text,beside",
+    [
+        (GROUPS_ONLY_PYPROJECT, "setup.py"),
+        (GROUPS_ONLY_PYPROJECT, "setup.cfg"),
+        (
+            '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n'
+            + GROUPS_ONLY_PYPROJECT,
+            None,
+        ),
+        ('[tool.flit.metadata]\nmodule = "mypkg"\nrequires = ["numpy"]\n' + GROUPS_ONLY_PYPROJECT, None),
+        ('[tool.pdm]\ndependencies = ["numpy"]\n' + GROUPS_ONLY_PYPROJECT, None),
+    ],
+    ids=["setup-py", "setup-cfg", "build-system", "flit-metadata", "pdm-dependencies"],
+)
+def test_pyproject_groups_without_project_in_a_buildable_project_errors(
+    capsys, fake_pypi, tmp_path, text, beside, flag
+):
+    # The project's own dependencies live outside [project], so checking only the group would be a wrong answer.
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text, encoding="utf-8")
+    if beside:
+        (tmp_path / beside).write_text("", encoding="utf-8")
+    code, _, err = run(capsys, str(path), "-p", "3.13", "-t", "linux-x86_64", flag, "test")
+    assert code == 2 and "no [project] table" in err and "setup.py/setup.cfg" in err
+    assert not fake_pypi
+
+
 @pytest.mark.parametrize(
     "groups,flags,error",
     [
@@ -2810,11 +2880,12 @@ def test_pyproject_and_uv_lock_take_the_same_group(capsys, fake_pypi, fixtures, 
 
 
 @pytest.mark.usefixtures("index")
-def test_pyproject_dependency_group_resolves_tree(capsys, tmp_path):
+@pytest.mark.parametrize("project", ['[project]\nname = "mylib"\n', ""], ids=["with-project", "groups-only"])
+def test_pyproject_dependency_group_resolves_tree(capsys, tmp_path, project):
     path = tmp_path / "pyproject.toml"
-    path.write_text('[project]\nname = "mylib"\n[dependency-groups]\ntest = ["app"]\n', encoding="utf-8")
-    code, out, _ = run(capsys, str(path), "--group", "test", "--deps", "-p", "3.14", "-t", "win-arm64", "--json")
-    assert code == 1
+    path.write_text(project + '[dependency-groups]\ntest = ["app"]\n', encoding="utf-8")
+    code, out, err = run(capsys, str(path), "--group", "test", "--deps", "-p", "3.14", "-t", "win-arm64", "--json")
+    assert code == 1, err
     assert {row["name"] for row in json.loads(out)["packages"]} == {"app", "lib", "crypt", "winonly"}
 
 
@@ -4418,5 +4489,5 @@ def test_script_deps_refuses_private_index(capsys, fake_pypi, tmp_path):
     code, out, err = run(capsys, str(script), "--deps", "-p", "3.13", "-t", "win-arm64")
     assert code == 2
     assert "the script configures an installer index or source; --deps uses only PyPI" in err
-    assert "lockfile" not in err  # wheelgap can't read example.py.lock
+    assert "--deps uses only PyPI, so check its lock (uv lock --script) instead" in err
     assert fake_pypi == []

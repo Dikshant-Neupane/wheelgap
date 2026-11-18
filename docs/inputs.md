@@ -44,13 +44,13 @@ A **file** is read by its name:
 
 | file name | read as |
 | --- | --- |
-| `uv.lock`, or another `*.lock` name containing `uv` | `uv.lock` |
+| `uv.lock`, a script's `*.py.lock`, or another `*.lock` name containing `uv` | `uv.lock` |
 | `pylock.toml`, `pylock.*.toml` | `pylock.toml` |
 | `poetry.lock` | `poetry.lock` |
 | `pdm.lock` | `pdm.lock` |
 | `Pipfile.lock` | `Pipfile.lock` |
 | `pixi.lock` | `pixi.lock` |
-| `requirements*.lock`, `*.txt`, `*.in` | a requirements file |
+| `requirements*.lock` (but not `requirements*.py.lock`), `*.txt`, `*.in` | a requirements file |
 | `*.json` | a pip installation report |
 | `environment*.yml`, `environment*.yaml` | a conda environment file (pip packages) |
 | `pyproject.toml` | a project's direct dependencies |
@@ -71,6 +71,12 @@ only a Windows-only dependency pulls in isn't reported on Linux.
 
 **Skipped:** packages whose source is `editable`, `virtual`, `git`, `path`, `directory` or `url`. Packages from
 another index keep their locked files and are never looked up on PyPI.
+
+A script's lock from `uv lock --script example.py`, `example.py.lock`, has the same format and is read the same way,
+from the script's `[manifest] requirements`: `wheelgap example.py.lock` and `wheelgap diff old.py.lock new.py.lock`.
+The lock doesn't record `no-build`, `no-binary`, `no-build-package` or `no-binary-package` set in the script's own
+`[tool.uv]`, so when the script beside the lock sets any of them, the lock is refused (exit 2) rather than read without
+them.
 
 **Build restrictions:** wheelgap reads `no-build`, `no-build-package`, `no-binary` and
 `no-binary-package` from the adjacent `pyproject.toml`'s `[tool.uv]` table or `uv.toml`. When both
@@ -350,6 +356,14 @@ errors (exit 2); a group that isn't selected isn't read further than its name. `
 group is included by default. A `dependencies` listed in `[project] dynamic` is an input error (exit 2), as are dynamic
 `optional-dependencies` with `--extra`/`--all-extras` and Poetry dependencies kept in `[tool.poetry.dependencies]`
 (check `poetry.lock` instead).
+
+A `pyproject.toml` with `[dependency-groups]` and no `[project]` table requires `--group NAME` or `--only-group NAME`.
+Both flags check the selected groups, including any included groups, and work with `--deps`. `--extra` and
+`--all-extras` are input errors because the file has no `[project] optional-dependencies`.
+A file like that which still builds a package stays an input error (exit 2): one with a `[build-system]` table, a
+`setup.py` or `setup.cfg` beside it, `[tool.flit.metadata]` or `[tool.pdm] dependencies`, since its dependencies are
+kept where wheelgap doesn't read them (check a lockfile instead).
+
 `check_lockfile()` and `wheelgap diff` don't read `pyproject.toml` as an input.
 
 ## Python scripts
@@ -384,8 +398,9 @@ errors here.
 If the block's `[tool.uv]` sets an index or sources (or a `uv.toml` or `pyproject.toml` beside the script or above it
 does), its packages may not be PyPI's: `--deps` refuses the script, and their names aren't sent to the services other
 flags use ([which names leave the run](how-it-works.md#pypi-origin)). [`--fix`](cli.md#fix) gives the `[tool.uv]`
-lines to add to the block for `uv run`. wheelgap doesn't read a script's lock (`example.py.lock`, from
-`uv lock --script`) yet. Without `--deps`, `check_lockfile()` and `wheelgap diff` don't read a script.
+lines to add to the block for `uv run`. To check what the script installs, pass its lock instead
+(`example.py.lock`, from `uv lock --script`), which is read as a [`uv.lock`](#uvlock). Without `--deps`,
+`check_lockfile()` and `wheelgap diff` don't read a script.
 
 A `.py` argument that isn't an existing file, such as `discord.py`, is still a [package name](#package-names).
 

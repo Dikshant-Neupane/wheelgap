@@ -483,6 +483,8 @@ def _check_lockfile(
             f"wheelgap.diff don't read it; pass a lockfile (the wheelgap command checks {what})"
         )
     source: Source = load_file(lockfile, environment)
+    if source.pyproject_groups_only:
+        raise SourceError(f"{lockfile}: no [project] table, so there are no dependencies to read")
     if environment is not None and source.kind != "pixi":
         raise SourceError(f"{lockfile}: environment applies to pixi.lock only")
 
@@ -497,8 +499,11 @@ def _check_lockfile(
             raise SourceError(
                 "offline=True: deps=True would look packages up on PyPI; pass deps=False, or set offline=False"
             )
-        # wheelgap can't read a script's lock (example.py.lock), so a script gets no lockfile advice.
-        instead = "" if source.kind == "script" else ", so check a lockfile instead"
+        instead = (
+            ", so check its lock (uv lock --script) instead"
+            if source.kind == "script"
+            else ", so check a lockfile instead"
+        )
         if not source.pypi_only:
             what = "the script" if source.kind == "script" else "the project"
             raise SourceError(
