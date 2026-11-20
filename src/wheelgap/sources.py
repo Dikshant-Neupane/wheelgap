@@ -1845,7 +1845,15 @@ def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
     (`_parse_and_recurse` in pip/_internal/req/req_file.py). The spellings are `-r f`, `-rf`, `-r=f`,
     `--requirement f` and `--requirement=f` (and the same for -c). None for a line pip reads as an editable
     requirement, or one with an abbreviated include, which _abbreviated_include reports instead."""
+
+    def editable(token: str) -> bool:
+        option = token.partition("=")[0]
+        return (token.startswith("-e") and not token.startswith("--")) or (
+            len(option) > 3 and "--editable".startswith(option)
+        )
+
     found: dict[bool, list[str]] = {False: [], True: []}
+    unread = ""  # an editable or an abbreviated include, which this function doesn't follow
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -1859,12 +1867,10 @@ def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
             name, constraint = token[:2], token.startswith("-c")
             eq, value = ("=", token[2:].removeprefix("=")) if len(token) > 2 else ("", "")
         else:
-            if (token.startswith("-e") and not token.startswith("--")) or (
-                len(option) > 3 and "--editable".startswith(option)
-            ):
-                return None
-            if _abbreviated_include(token):
-                return None
+            if editable(token):
+                unread = unread or "an editable"
+            elif _abbreviated_include(token):
+                unread = unread or "an abbreviated -r or -c"
             continue
         if not eq:
             value = tokens[i] if i < len(tokens) else ""
@@ -1872,6 +1878,11 @@ def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
         if not value:
             raise SourceError(f"{label}: {name} needs a file name")
         found[constraint].append(value)
+    if unread:
+        if editable(tokens[0]) or not (found[False] or found[True]):
+            return None  # read as an editable, or reported by _abbreviated_include, as before
+        # pip's answer depends on options wheelgap doesn't read here, so a guess could leave packages out.
+        raise SourceError(f"{label}: wheelgap can't read a -r or -c on a line with {unread}: {' '.join(tokens)}")
     if found[False]:
         return False, found[False][0]
     if found[True]:

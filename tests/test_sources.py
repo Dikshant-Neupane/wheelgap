@@ -309,7 +309,6 @@ def test_requirements_constraint_after_other_options(tmp_path, line):
         # optparse collects every -r and -c, and pip follows only the first -r, or the first -c if there's no -r
         ("-r a.txt -r b.txt", ["purewheel"]),
         ("-c pins.txt -r a.txt", ["purewheel"]),
-        ("-c pins.txt -c b.txt", []),
     ],
 )
 def test_requirements_line_with_several_includes_reads_what_pip_reads(tmp_path, line, names):
@@ -319,6 +318,15 @@ def test_requirements_line_with_several_includes_reads_what_pip_reads(tmp_path, 
     path = tmp_path / "requirements.txt"
     path.write_text(f"{line}\n", encoding="utf-8")
     assert [p.name for p in parse_requirements(path).packages] == names
+
+
+def test_requirements_line_with_two_constraints_reads_only_the_first(tmp_path):
+    (tmp_path / "pins.txt").write_text("ranged>=1\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("ranged==1.9\n", encoding="utf-8")
+    path = tmp_path / "requirements.txt"
+    path.write_text("ranged\n-c pins.txt -c b.txt\n", encoding="utf-8")
+    (ranged,) = parse_requirements(path).packages
+    assert (ranged.version, ranged.spec) == (None, ">=1")
 
 
 def test_requirements_editable_line_follows_no_include(tmp_path):
@@ -344,6 +352,10 @@ def test_requirements_format_option_before_include_still_applies(tmp_path):
         ("-r 'unclosed", "pip can't split this line"),
         ("--pre -r", "-r needs a file name"),
         ("--constraint=", "--constraint needs a file name"),
+        # pip's answer would depend on an option wheelgap doesn't read, so it's refused rather than guessed
+        ("-r a.txt --req b.txt", "on a line with an abbreviated -r or -c"),
+        ("-c a.txt --req b.txt", "on a line with an abbreviated -r or -c"),
+        ("-r a.txt -e ./localpkg", "on a line with an editable"),
     ],
 )
 def test_requirements_unreadable_option_line_is_an_error(tmp_path, line, message):
