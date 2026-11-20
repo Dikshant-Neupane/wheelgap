@@ -346,6 +346,23 @@ def test_requirements_format_option_before_include_still_applies(tmp_path):
     assert (purewheel.no_binary, purewheel.only_binary) == (True, False)
 
 
+@pytest.mark.parametrize(
+    "line,names",
+    [
+        # optparse takes the token after an option with a value as that value, even one starting with -
+        ("--no-binary -r base.txt", ["fastlib"]),
+        ("--extra -r base.txt", ["fastlib"]),  # an abbreviation of --extra-index-url
+        ("-i -cpins.txt -r base.txt", ["purewheel", "fastlib"]),
+        ("--pre -r base.txt", ["purewheel", "fastlib"]),  # --pre is an option of its own, not short for --prefer-binary
+    ],
+)
+def test_requirements_option_values_are_not_read_as_options(tmp_path, line, names):
+    (tmp_path / "base.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    path = tmp_path / "requirements.txt"
+    path.write_text(f"{line}\nfastlib==2.0.0\n", encoding="utf-8")
+    assert [p.name for p in parse_requirements(path).packages] == names
+
+
 def test_requirements_format_option_after_include_still_applies(tmp_path):
     # optparse applies every option on the line before pip reads the include
     (tmp_path / "base.txt").write_text("purewheel==3.1\n", encoding="utf-8")

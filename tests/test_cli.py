@@ -3482,6 +3482,17 @@ def test_github_annotations_requirements_lines(capsys, fake_pypi, tmp_path, monk
     assert annotate(capsys, tmp_path, str(req)) == ["::error file=requirements.txt,line=4,"]
 
 
+def test_github_annotations_requirements_include_after_options(capsys, fake_pypi, tmp_path, monkeypatch):
+    # The scan follows a -r where the parser does (after other options, or a quoted path), so lines still match.
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    req = tmp_path / "requirements.txt"
+    (tmp_path / "dir with space").mkdir()
+    (tmp_path / "dir with space" / "other.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    for line in ('--pre -r "dir with space/other.txt"', '-r "dir with space/other.txt" -r gone.txt'):
+        req.write_text(f"{line}\nnowheels==0.9\n", encoding="utf-8")
+        assert annotate(capsys, tmp_path, str(req)) == ["::error file=requirements.txt,line=2,"]
+
+
 def test_github_annotations_requirements_cross_check(capsys, fake_pypi, tmp_path, monkeypatch):
     # The file is read twice; if the scan doesn't find what the parser read (here the file changed in between, so
     # every line moved down), no line is used.

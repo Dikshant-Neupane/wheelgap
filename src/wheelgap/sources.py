@@ -1804,7 +1804,6 @@ _NAMED_URL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\s*(\[[^\]]*\])?\s*@")
 _EGG_RE = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
 _COMMENT_RE = re.compile(r"\s#")
 _FULL_LINE_COMMENT_RE = re.compile(r"^\s*#")
-_INCLUDE_RE = re.compile(r"^(?:-r|--requirement)(?:\s+|=)?(\S.*)$")
 _VIA_COMMENT_RE = re.compile(r"^#\s*via\b")
 
 
@@ -1837,6 +1836,35 @@ def _abbreviated_include(line: str) -> bool:
         ):
             return True
     return False
+
+
+# Line options that take a value, and those that don't, from pip's get_line_parser (SUPPORTED_OPTIONS and
+# SUPPORTED_OPTIONS_REQ in pip/_internal/req/req_file.py), less the includes and editables _line_include handles.
+_VALUE_OPTIONS = (
+    "--index-url",
+    "--extra-index-url",
+    "--find-links",
+    "--no-binary",
+    "--only-binary",
+    "--trusted-host",
+    "--use-feature",
+    "--hash",
+    "--config-settings",
+)
+_FLAG_OPTIONS = ("--no-index", "--pre", "--prefer-binary", "--require-hashes")
+
+
+def _takes_value(token: str) -> bool:
+    """Whether optparse reads the token after this one as its value: `-i URL`, `--no-binary :all:`, or an
+    abbreviation optparse expands to one of these (`--extra URL`)."""
+    if token in ("-i", "-f"):
+        return True
+    if "=" in token or not token.startswith("--") or len(token) <= 2:
+        return False
+    if token in _VALUE_OPTIONS or token in _FLAG_OPTIONS:
+        return token in _VALUE_OPTIONS
+    matches = [name for name in _VALUE_OPTIONS + _FLAG_OPTIONS if name.startswith(token)]
+    return len(matches) == 1 and matches[0] in _VALUE_OPTIONS
 
 
 def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
@@ -1872,6 +1900,8 @@ def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
                 unread = unread or "an editable"
             elif _abbreviated_include(token):
                 unread = unread or "an abbreviated -r or -c"
+            if _takes_value(token) or (editable(token) and not eq and token in ("-e", "--editable")):
+                i += 1  # optparse takes the next token as this option's value: `--no-binary -r f` names no include
             continue
         if not eq:
             value = tokens[i] if i < len(tokens) else ""
