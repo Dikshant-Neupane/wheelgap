@@ -1805,7 +1805,6 @@ _EGG_RE = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
 _COMMENT_RE = re.compile(r"\s#")
 _FULL_LINE_COMMENT_RE = re.compile(r"^\s*#")
 _INCLUDE_RE = re.compile(r"^(?:-r|--requirement)(?:\s+|=)?(\S.*)$")
-_CONSTRAINT_RE = re.compile(r"^(?:-c(?:\s+|=)?|--constraint(?:\s+|=))(\S.*)$")
 _VIA_COMMENT_RE = re.compile(r"^#\s*via\b")
 
 
@@ -1829,12 +1828,55 @@ def _names_index_option(line: str) -> bool:
 def _abbreviated_include(line: str) -> bool:
     """An abbreviation of --requirement or --constraint (`--requirem f`, `--cons f`), which pip reads but wheelgap
     doesn't follow: the file it names may set an index."""
-    option = line.split(None, 1)[0].split("=", 1)[0]
-    return (
-        len(option) > 2
-        and option not in ("--requirement", "--constraint")
-        and any(name.startswith(option) for name in ("--requirement", "--constraint"))
-    )
+    for token in line.split():
+        option = token.split("=", 1)[0]
+        if (
+            len(option) > 2
+            and option not in ("--requirement", "--constraint")
+            and any(name.startswith(option) for name in ("--requirement", "--constraint"))
+        ):
+            return True
+    return False
+
+
+def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
+    """The file pip reads for a line of options, as (whether it's a constraints file, its path). optparse collects
+    every -r and -c on the line, and pip follows only the first -r, or the first -c if there's no -r
+    (`_parse_and_recurse` in pip/_internal/req/req_file.py). The spellings are `-r f`, `-rf`, `-r=f`,
+    `--requirement f` and `--requirement=f` (and the same for -c). None for a line pip reads as an editable
+    requirement, or one with an abbreviated include, which _abbreviated_include reports instead."""
+    found: dict[bool, list[str]] = {False: [], True: []}
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if token == "--":  # optparse reads no options after it
+            break
+        option, eq, value = token.partition("=")
+        if option in ("--requirement", "--constraint"):
+            name, constraint = option, option == "--constraint"
+        elif token.startswith(("-r", "-c")) and not token.startswith("--"):
+            name, constraint = token[:2], token.startswith("-c")
+            eq, value = ("=", token[2:].removeprefix("=")) if len(token) > 2 else ("", "")
+        else:
+            if (token.startswith("-e") and not token.startswith("--")) or (
+                len(option) > 3 and "--editable".startswith(option)
+            ):
+                return None
+            if _abbreviated_include(token):
+                return None
+            continue
+        if not eq:
+            value = tokens[i] if i < len(tokens) else ""
+            i += 1
+        if not value:
+            raise SourceError(f"{label}: {name} needs a file name")
+        found[constraint].append(value)
+    if found[False]:
+        return False, found[False][0]
+    if found[True]:
+        return True, found[True][0]
+    return None
 
 
 class _FormatControl:
@@ -2079,8 +2121,17 @@ def _read_requirements(
                 and (_names_index_option(line) or _abbreviated_include(line))
             ):
                 index_options.append(line)
-            if m := _CONSTRAINT_RE.match(line):
-                target = m.group(1).strip()
+            include = None
+            if line.startswith("-"):
+                try:
+                    tokens = shlex.split(line)  # as pip reads a line of options
+                except ValueError:
+                    raise SourceError(f"{path.name}: pip can't split this line (an unclosed quote?): {line}") from None
+                include = _line_include(tokens, path.name)
+            if include and format_control is not None:
+                _apply_format_options(line, format_control)  # pip applies `--no-binary X -r f` before reading f
+            if include and include[0]:
+                target = include[1]
                 # A URL (-c https://releases.openstack.org/...) or ${VAR} is left to pip: it's skipped, as before.
                 # Unread, it may name an index, so the input isn't PyPI-only.
                 if "://" not in target and "${" not in target:
@@ -2090,10 +2141,10 @@ def _read_requirements(
                 elif not already_seen and index_options is not None:
                     index_options.append(line)
                 continue
-            if m := _INCLUDE_RE.match(line):  # -r file, -rfile, --requirement file, --requirement=file
+            if include:  # -r file, -rfile, --requirement file, --requirement=file, after other options too
                 pkgs.extend(
                     _read_requirements(
-                        path.parent / m.group(1).strip(),
+                        path.parent / include[1],
                         seen,
                         constraints,
                         constraint,

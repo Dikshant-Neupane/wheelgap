@@ -377,6 +377,14 @@ def test_quiet_still_reports_bad_input(capsys, fixtures):
     assert code == 2 and not out and "no lockfile found" in err
 
 
+def test_requirements_line_pip_cant_split_exits_2(capsys, tmp_path, fake_pypi):
+    req = tmp_path / "requirements.txt"
+    req.write_text("fastlib==2.0.0\n-r 'unclosed\n", encoding="utf-8")
+    code, out, err = run(capsys, str(req))
+    assert code == 2 and not out and not fake_pypi
+    assert "requirements.txt" in err and "-r 'unclosed" in err
+
+
 def test_quiet_preserves_fail_on_missing(capsys, fake_pypi):
     code, out, err = run(capsys, "nowheels", "-p", "3.13", "-t", "linux", "--fail-on", "missing", "--quiet")
     assert code == 0 and not err
