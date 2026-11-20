@@ -346,6 +346,15 @@ def test_requirements_format_option_before_include_still_applies(tmp_path):
     assert (purewheel.no_binary, purewheel.only_binary) == (True, False)
 
 
+def test_requirements_format_option_after_include_still_applies(tmp_path):
+    # optparse applies every option on the line before pip reads the include
+    (tmp_path / "base.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    path = tmp_path / "requirements.txt"
+    path.write_text("-r base.txt --no-binary :all:\n", encoding="utf-8")
+    (purewheel,) = parse_requirements(path).packages
+    assert (purewheel.no_binary, purewheel.only_binary) == (True, False)
+
+
 @pytest.mark.parametrize(
     "line,message",
     [

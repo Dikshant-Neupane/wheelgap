@@ -1843,7 +1843,8 @@ def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
     """The file pip reads for a line of options, as (whether it's a constraints file, its path). optparse collects
     every -r and -c on the line, and pip follows only the first -r, or the first -c if there's no -r
     (`_parse_and_recurse` in pip/_internal/req/req_file.py). The spellings are `-r f`, `-rf`, `-r=f`,
-    `--requirement f` and `--requirement=f` (and the same for -c). None for a line pip reads as an editable
+    `--requirement f` and `--requirement=f` (and the same for -c). `-r=f` is read as `f`, as wheelgap always has, though
+    pip's optparse would read a file named `=f`. None for a line pip reads as an editable
     requirement, or one with an abbreviated include, which _abbreviated_include reports instead."""
 
     def editable(token: str) -> bool:
