@@ -177,12 +177,14 @@ _NAME_START_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 def requirement_lines(path: Path, seen: set[Path] | None = None) -> list[tuple[Package, Path, int | None]] | None:
     """Each requirement of a requirements file and the files it includes with -r, as the parser reads them: the
     package, the file and the line its name is on (None if that isn't clear). None if a file can't be read the
-    same way."""
+    same way. A file is read through the folder it was named in, as the parser reads it, so an annotation
+    names the file pip reads; `seen` keeps the resolved path, so a file reached by two names is scanned once."""
     seen = set() if seen is None else seen
-    path = path.resolve()
-    if path in seen:
+    path = Path(os.path.abspath(path))
+    resolved = path.resolve()
+    if resolved in seen:
         return []
-    seen.add(path)
+    seen.add(resolved)
     lines = _lines(path)
     if lines is None or any(_OTHER_BREAKS.search(line) for line in lines):
         return None
@@ -317,10 +319,25 @@ class Locator:
 def relative_path(path: Path, root_env: str = "GITHUB_WORKSPACE") -> str | None:
     """The path GitHub expects: relative to the repository (the `root_env` variable, GITHUB_WORKSPACE by default,
     else the current directory), with forward slashes. None for a file outside it, which GitHub couldn't show in the
-    diff."""
+    diff. The path as named wins when it is inside the repository: a file pip reads through a link is annotated
+    under the link's path, not the path the link points into. A file the link takes outside the repository falls
+    back to the resolved path, as before."""
     base = os.environ.get(root_env) or os.getcwd()
+    named = Path(os.path.abspath(path))
+    base_named = Path(os.path.abspath(base))
     try:
-        return path.resolve().relative_to(Path(base).resolve()).as_posix()
+        rel = named.relative_to(base_named)
+    except ValueError:
+        rel = None
+    if rel is not None:
+        try:
+            inside = named.resolve().is_relative_to(base_named.resolve())
+        except OSError:
+            inside = False
+        if inside:
+            return rel.as_posix()
+    try:
+        return path.resolve().relative_to(base_named.resolve()).as_posix()
     except (OSError, ValueError):
         return None
 
