@@ -1040,7 +1040,9 @@ def _run_cli(argv: list[str], path: Path, *, positional: bool = True, project: P
 
     # --color=never: a dim() note under FORCE_COLOR starts with an ANSI escape instead of "wheelgap: ",
     # so it would be dropped from notes. _run_cli parses every tool's stderr, so set it here for all of them.
-    argv = ["--color=never", *argv]
+    # --no-quiet: a project's quiet = true would switch the notes off for the MCP client too, and the tools
+    # return those notes as their explanation (e.g. why gap_wheels is empty). --json doesn't depend on quiet.
+    argv = ["--color=never", "--no-quiet", *argv]
     argv = [*argv, "--", str(path)] if positional else argv
     out, err = io.StringIO(), io.StringIO()
     try:

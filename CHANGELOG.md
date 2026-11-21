@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The MCP server's tools keep the notes that explain an empty `gap_wheels` even when the project sets `quiet = true`, so a client can still tell "no wheel fills these gaps" from "wasn't checked" or "--fix is off with another index". (#617, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - `--github-annotations --fix` puts the full stop before the pip command instead of after it, so copying the command from an annotation no longer gives pip a version ending in a full stop. (#615, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - Requirements files: a `-r` inside a constraints file is read as requirements, as pip reads it (pip's [`_parse_and_recurse`](https://github.com/pypa/pip/blob/26.3/src/pip/_internal/req/req_file.py#L361-L366) sets `nested_constraint = False` for `-r`), instead of being read as more constraints so its packages are never checked. A `-c` inside a constraints file stays a constraints file. (#613, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - The "pick one with `--group`" error for a `pyproject.toml` with no `[project]` table lists only group names PEP 735 allows, so a quoted group key holding a line break or an escape code no longer reaches the terminal, CI log or MCP client; if no group has a valid name, it says there are no groups to select. The Python API's `check_lockfile` gives the same message. (#590, thanks [@jay23606](https://github.com/jay23606))

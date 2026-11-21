@@ -1073,6 +1073,55 @@ def test_check_lockfile_fix_says_when_no_gap_wheel_fits(fake_pypi, gap_wheels, t
     assert "--fix: no wheel on the gap wheel index fills these gaps" in data["notes"]
 
 
+def test_check_lockfile_quiet_config_keeps_notes(fake_pypi, gap_wheels, tmp_path, monkeypatch):
+    # A project that sets quiet = true for its own terminal runs must not lose the MCP notes.
+    path = nowheels_requirements(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\nquiet = true\n", encoding="utf-8")
+
+    def check(**arguments):
+        (_, reply) = run(init(), call("check_lockfile", path=path, **arguments))
+        return reply["result"]["structuredContent"]
+
+    # The --fix note, with the gap wheel list from the fixture: no wheel fills the gap.
+    quiet = check(fix=True, **FT_WIN_ARM)
+    assert quiet["gap_wheels"] == []
+    assert "--fix: no wheel on the gap wheel index fills these gaps" in quiet["notes"]
+    (tmp_path / "pyproject.toml").unlink()
+    assert check(fix=True, **FT_WIN_ARM)["notes"] == quiet["notes"]
+
+    # The same, with a gap wheel from the fixture that fills the gap.
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\nquiet = true\n", encoding="utf-8")
+    quiet = check(fix=True, **FT_WIN_ARM)
+    assert [w["name"] for w in quiet["gap_wheels"]] == ["nowheels"]
+    (tmp_path / "pyproject.toml").unlink()
+    plain = check(fix=True, **FT_WIN_ARM)
+    assert plain["gap_wheels"] == quiet["gap_wheels"] and plain["notes"] == quiet["notes"]
+
+    # A note that needs no network: --fix is off with another index, so the list is never read.
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://mirror.example.com/pypi")
+    (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\nquiet = true\n", encoding="utf-8")
+    calls = gap_wheels.calls
+    quiet = check(fix=True, **FT_WIN_ARM)
+    assert quiet["gap_wheels"] == [] and gap_wheels.calls == calls
+    assert any(note.startswith("--fix is off with ") for note in quiet["notes"])
+    (tmp_path / "pyproject.toml").unlink()
+    assert check(fix=True, **FT_WIN_ARM)["notes"] == quiet["notes"]
+
+
+def test_check_dockerfile_quiet_config_keeps_notes(fake_pypi, gap_wheels, tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM python:3.13-alpine\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\nquiet = true\n", encoding="utf-8")
+    arguments = {"dockerfile": str(tmp_path / "Dockerfile"), "path": nowheels_requirements(tmp_path)}
+    (_, quiet_reply) = run(init(), call("check_dockerfile", fix=True, **arguments))
+    quiet = quiet_reply["result"]["structuredContent"]
+    assert quiet["gap_wheels"] == []
+    assert "--fix: no wheel on the gap wheel index fills these gaps" in quiet["notes"]
+    (tmp_path / "pyproject.toml").unlink()
+    (_, reply) = run(init(), call("check_dockerfile", fix=True, **arguments))
+    assert reply["result"]["structuredContent"]["notes"] == quiet["notes"]
+
+
 def test_check_lockfile_fix_is_off_with_another_index(fake_pypi, gap_wheels, tmp_path, monkeypatch):
     # A mirror may hold private names: the list isn't read, as on the command line, and a note says so.
     monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://mirror.example.com/pypi")
