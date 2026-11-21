@@ -545,16 +545,24 @@ def results_json(
             if c.compared and not c.agrees
         ],
         "not_compared": [
-            {"name": c.name, "version": c.version, "target": label(c.target), "why": why_not_compared(c, installer)}
+            {
+                "name": c.name,
+                "version": c.version,
+                "target": label(c.target),
+                "why": why_not_compared(c, installer),
+                # False for an unsupported target or uv's known difference from pip: listed, but the run passes
+                "fails_run": c.skipped is None,
+            }
             for c in checks
             if not c.compared
         ],
     }
 
 
-def report(checks: list[Check], out=sys.stdout, *, installer: str = "pip") -> int:
+def report(checks: list[Check], out=None, *, installer: str = "pip") -> int:
     """Print the disagreements and the checks that couldn't be made. 1 if any disagree, else 2 if any couldn't be
     made (apart from unsupported targets and uv's known difference from pip), else 0."""
+    out = out or sys.stdout  # looked up when called, not when the script is loaded
     compared = [c for c in checks if c.compared]
     wrong = [c for c in compared if not c.agrees]
     failed = [c for c in checks if not c.compared]

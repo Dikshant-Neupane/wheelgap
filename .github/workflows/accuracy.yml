@@ -53,12 +53,9 @@ jobs:
             {
               echo "### wheelgap against $installer"
               echo
-              if [ -s "$json" ]; then
-                jq -r 'if .mismatch_rate == null then "Mismatch rate: n/a (nothing compared)"
-                  else "Mismatch rate: \((.mismatch_rate * 1000 | round) / 10)% (\(.totals.disagree) of \(.totals.compared) compared)"
-                  end' "$json"
-                echo
-              fi
+              # The rate as the script's summary line words it (the first line of its report), so the two match.
+              sed -n '1s/.* couldn.t be compared\. \(Mismatch rate .*\)$/\1/p' "$log"
+              echo
               echo '~~~~~~~~~~text'
               head -c 60000 "$log" | sed 's/^~~~~/ ~~~~/'  # the log can't close the fence
               echo

@@ -442,8 +442,14 @@ def test_json_file_counts_match_the_text_report(fake_pypi, monkeypatch, capsys, 
     assert wrong["command"] in out  # the same pip command the text report prints
     assert wrong["command"].startswith("pip install --dry-run ") and wrong["command"].endswith(" fastlib==2.0.0")
     assert sorted(data["not_compared"], key=lambda c: c["target"]) == [
-        {"name": "not-on-index", "version": None, "target": "3.13 linux-x86_64", "why": "not on index"},
-        {"name": "not-on-index", "version": None, "target": "3.13 win-amd64", "why": "not on index"},
+        {
+            "name": "not-on-index",
+            "version": None,
+            "target": "3.13 linux-x86_64",
+            "why": "not on index",
+            "fails_run": True,
+        },
+        {"name": "not-on-index", "version": None, "target": "3.13 win-amd64", "why": "not on index", "fails_run": True},
     ]
     assert "not-on-index  -        3.13 win-amd64  not on index" in out  # the reason the text gives too
 
@@ -456,6 +462,18 @@ def test_json_file_when_nothing_could_be_compared(fake_pypi, monkeypatch, capsys
     assert data["mismatch_rate"] is None
     assert all(t["mismatch_rate"] is None for t in data["by_target"].values())
     assert data["disagreements"] == []
+
+
+def test_json_marks_expected_skips_as_not_failing_the_run():
+    # uv can't target free-threaded Python: listed as not compared, but it doesn't fail the run (exit 0).
+    checks = script.check_one(
+        Result("x", "1"), [_target("linux-x86_64", python="3.14t")], lambda *a: script.InstallerAnswer(), "uv"
+    )
+    assert script.report(checks, out=io.StringIO(), installer="uv") == 0
+    data = script.results_json(checks, ["x"], [checks[0].target], installer="uv", installer_version="uv 0.13")
+    [entry] = data["not_compared"]
+    assert entry["fails_run"] is False and "free-threaded" in entry["why"]
+    assert data["mismatch_rate"] is None
 
 
 def test_no_json_file_without_the_flag(fake_pypi, monkeypatch, capsys, tmp_path, pip_installed):
