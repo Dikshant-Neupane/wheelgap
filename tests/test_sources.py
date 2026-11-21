@@ -383,6 +383,8 @@ def test_requirements_format_option_after_include_still_applies(tmp_path):
         ("-r a.txt --req b.txt", "on a line with an abbreviated -r or -c"),
         ("-c a.txt --req b.txt", "on a line with an abbreviated -r or -c"),
         ("-r a.txt -e ./localpkg", "on a line with an editable"),
+        # the token after an abbreviated include is its value, so the -C here doesn't hide the -r that pip follows
+        ("--cons -C -r a.txt", "on a line with an abbreviated -r or -c"),
     ],
 )
 def test_requirements_unreadable_option_line_is_an_error(tmp_path, line, message):

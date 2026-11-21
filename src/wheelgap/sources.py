@@ -1900,7 +1900,12 @@ def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
                 unread = unread or "an editable"
             elif _abbreviated_include(token):
                 unread = unread or "an abbreviated -r or -c"
-            if _takes_value(token) or (editable(token) and not eq and token in ("-e", "--editable")):
+            if (
+                _takes_value(token)
+                or (editable(token) and not eq and token in ("-e", "--editable"))
+                # `--cons -C -r f`: -C is --cons's value, so pip reads the -r
+                or (token.startswith("--") and _abbreviated_include(token) and not eq)
+            ):
                 i += 1  # optparse takes the next token as this option's value: `--no-binary -r f` names no include
             continue
         if not eq:
