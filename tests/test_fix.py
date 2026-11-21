@@ -849,6 +849,25 @@ def test_github_annotation_gap_wheel_pip_command_ends_with_the_version(
     Requirement(text.split()[-1])  # raises if the last word is not a valid requirement
 
 
+def test_github_annotation_gap_wheel_pip_command_is_last_for_a_file_outside_the_workspace(
+    capsys, fake_pypi, gap_wheels, tmp_path, monkeypatch
+):
+    # A file GitHub can't show in the diff is named in the message, "(in FILE)". That comes before the gap wheel
+    # sentence, so the pip command still ends the annotation (#609).
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path / "repo"))
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    req = tmp_path / "elsewhere" / "requirements.txt"
+    req.write_text("nowheels==0.9\n", encoding="utf-8")
+    code, out, _ = run(capsys, str(req), "-p", "3.14t", "-t", "win-arm64", "--github-annotations", "--fix")
+    assert code == 1
+    (line,) = _annotations(out)
+    assert line.startswith("::error title=")  # no file= property: it's outside the workspace
+    assert " (in " in line and line.index(" (in ") < line.index(" A gap wheel on wheelgap's gap wheel index")
+    assert line.endswith(f"Install it with: pip install --extra-index-url {INDEX} nowheels==0.9")
+
+
 def test_github_annotation_for_a_uv_lock_points_to_the_logs_gap_wheel_section(
     capsys, fake_pypi, fixtures, gap_wheels, monkeypatch
 ):

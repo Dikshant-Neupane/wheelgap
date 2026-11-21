@@ -385,8 +385,6 @@ def annotation(
             message += " Source builds are allowed (fail-on missing), so this doesn't fail the run."
         else:
             message += " Gaps on advisory targets don't fail the run."
-    if fills:  # --fix: a gap wheel never changes the level, the title or the line
-        message += gap_wheel_sentence(fills, multi_py)
     location = locator.locate(pkg)
     if deps_resolved and location is not None and not (gap_targets and all(rooted)):
         # Not the file's own requirement on every gap target, so its own line (if it has one, say with a marker
@@ -402,6 +400,9 @@ def annotation(
         line = location[1] if file is not None else None
         if file is None:
             message += f" (in {location[0]})"
+    if fills:  # --fix: a gap wheel never changes the level, the title or the line
+        # Last, after "(in FILE)", so the pip command ends the annotation and copies cleanly (#609).
+        message += gap_wheel_sentence(fills, multi_py)
     return workflow_command(level, message, file, line, f"{name}: {GAP_WORDS[worst][0]}")
 
 
