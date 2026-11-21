@@ -386,8 +386,8 @@ def test_requirements_line_pip_cant_split_exits_2(capsys, tmp_path, fake_pypi):
 
 
 def test_requirements_include_cycle_exits_2(capsys, tmp_path, monkeypatch):
-    # pip refuses an include cycle, so wheelgap does too: exit code 2, the same error with
-    # --github-annotations, which follows the same includes to find line numbers (#603).
+    # pip refuses an include cycle, so wheelgap does too: exit code 2, and the same error with
+    # --github-annotations, since the file is parsed before any line is looked up (#603).
     c1 = tmp_path / "c1.txt"
     c1.write_text("-r c2.txt\nrequests==2.32.5\n", encoding="utf-8")
     (tmp_path / "c2.txt").write_text("-r c1.txt\nidna==3.11\n", encoding="utf-8")
@@ -3521,7 +3521,7 @@ def test_github_annotations_requirements_other_line_breaks(capsys, fake_pypi, tm
 def test_github_annotations_requirements_lines(capsys, fake_pypi, tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
     req = tmp_path / "requirements.txt"
-    # Options, editables, paths and URLs aren't requirements with a line; an include cycle is an error (#603).
+    # Options, editables, paths and URLs aren't requirements with a line.
     req.write_text(
         "--index-url https://pypi.org/simple\n-e ./editable\n./local\n"
         "git+https://example.invalid/x.git#egg=gitpkg\nnamed @ https://example.invalid/named-1.0.tar.gz\n"

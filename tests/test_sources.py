@@ -379,6 +379,20 @@ def test_requirements_cycle_names_are_relative_to_the_starting_folder(tmp_path):
     )
 
 
+def test_requirements_cycle_names_a_file_above_the_starting_folder_by_its_relative_path(tmp_path):
+    # A cycle that leaves the starting folder: the file above it is ../a.txt, not a second "a.txt" (#603).
+    (tmp_path / "reqs").mkdir()
+    path = tmp_path / "reqs" / "a.txt"
+    path.write_text("-r ../a.txt\n", encoding="utf-8")
+    (tmp_path / "a.txt").write_text("-r reqs/a.txt\n", encoding="utf-8")
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(path)
+    assert str(caught.value) == (
+        "../a.txt: -r reqs/a.txt includes a file that is already being read "
+        "(a.txt -> ../a.txt -> a.txt); pip refuses this"
+    )
+
+
 def test_requirements_include_diamond_lists_packages_once(tmp_path):
     # A file included twice from two different files is fine: it is read once, as pip reads it (#603).
     path = tmp_path / "top.txt"

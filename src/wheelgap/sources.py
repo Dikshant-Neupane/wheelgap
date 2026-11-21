@@ -2129,11 +2129,15 @@ def _finalize_requirements(
 
 def _cycle_error(path: Path, line: str, target_path: Path, stack: list[Path]) -> SourceError:
     # Names in the chain are relative to the folder the run started in, so two files with the same
-    # name in different folders stay distinguishable; a file outside that folder keeps its name.
+    # name in different folders stay distinguishable (a file outside that folder is ../name). Forward slashes
+    # on every platform, as the include lines themselves are written.
     base = stack[0].parent
 
     def show(p: Path) -> str:
-        return str(p.relative_to(base)) if p.is_relative_to(base) else p.name
+        try:
+            return Path(os.path.relpath(p, base)).as_posix()
+        except ValueError:  # on another Windows drive: no relative path exists
+            return p.name
 
     return SourceError(
         f"{show(path)}: {line} includes a file that is already being read "
