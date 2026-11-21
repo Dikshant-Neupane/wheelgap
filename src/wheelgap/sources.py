@@ -2127,12 +2127,12 @@ def _finalize_requirements(
     )
 
 
-def _cycle_error(path: Path, line: str, target_path: Path, chain: list[Path]) -> SourceError:
+def _cycle_error(path: Path, line: str, target_path: Path, stack: list[Path]) -> SourceError:
     # Names in the chain are relative to the folder the run started in, so two files with the same
     # name in different folders stay distinguishable (a file outside that folder is ../name). Forward slashes
     # on every platform, as the include lines themselves are written. The chain names files as they were
     # written, so a cycle through a link names the link, as pip names it.
-    base = chain[0].parent
+    base = stack[0].parent
 
     def show(p: Path) -> str:
         try:
@@ -2142,7 +2142,7 @@ def _cycle_error(path: Path, line: str, target_path: Path, chain: list[Path]) ->
 
     return SourceError(
         f"{show(path)}: {line} includes a file that is already being read "
-        f"({' -> '.join(show(p) for p in (*chain, target_path))}); pip refuses this"
+        f"({' -> '.join(show(p) for p in (*stack, target_path))}); pip refuses this"
     )
 
 
@@ -2157,30 +2157,28 @@ def _read_requirements(
     compiler_signs: list[str] | None = None,
     stack: list[Path] | None = None,
     raw_lines: list[str] | None = None,
-    chain: list[Path] | None = None,
 ) -> list[Package]:
     """`index_options` collects the lines that may point pip at another index: index options (--index-url,
     --extra-index-url, --find-links, --no-index), includes that aren't read, and abbreviated include options.
     `req_lines` collects requirement lines that aren't constraints, for --deps; `compiler_signs` notes the
     `--hash` options and `# via` comments that mark pip-compile output, in requirement files only.
-    `stack` is the chain of files being read, `-r` and `-c` together, as pip keeps it; `chain` is the same
-    chain as the files were named, for the cycle error.
+    `stack` is the chain of files being read, `-r` and `-c` together, as pip keeps it: by the path each
+    file was named with.
 
     A file is read through the folder it was named in (`os.path.abspath`, no symlink resolution), as pip
     reads it, so an include in a symlinked file resolves against the link's folder, not the target's.
-    The loop and "already read" identity is the resolved path instead: a file reached by two names is
-    still read once, and a cycle through a link is refused, while pip's abspath identity would read it
-    twice and list its packages twice."""
+    An include is a cycle when that named path is already in `stack`, which is pip's rule: one shared
+    file linked into two folders may be on the chain under both names, since its includes are other files
+    each time. The "already read" identity is the resolved path instead: a file reached by two names
+    lists its own lines once (pip would list them twice), but its includes are followed again, from the
+    folder of the new name."""
     path = Path(os.path.abspath(path))
     resolved = path.resolve()
     if stack is None:
         stack = []
-    if chain is None:
-        chain = []
     already_seen = resolved in seen[constraint]
     seen[constraint].add(resolved)
-    stack.append(resolved)
-    chain.append(path)
+    stack.append(path)
     pkgs: list[Package] = []
     try:
         append = constraints.append if constraint else pkgs.append
@@ -2219,16 +2217,14 @@ def _read_requirements(
                 # A URL (-c https://releases.openstack.org/...) or ${VAR} is left to pip: it's skipped, as before.
                 # Unread, it may name an index, so the input isn't PyPI-only.
                 if "://" not in target and "${" not in target:
-                    # The include is read from the including file's folder as named; the cycle check
-                    # uses the resolved path, so a loop through a link is refused too, and the error
-                    # names the chain as it was written.
-                    target_named = Path(os.path.abspath(path.parent / target))
-                    target_path = target_named.resolve()
+                    # The include is read from the including file's folder as named, and that named
+                    # path is what the cycle check compares, as pip does.
+                    target_path = Path(os.path.abspath(path.parent / target))
                     if target_path in stack:
                         # An include naming a file already being read is an error, as pip refuses it:
                         # the chain is one chain for -r and -c together, so a loop through a
                         # constraints file is refused too.
-                        raise _cycle_error(path, line, target_named, chain)
+                        raise _cycle_error(path, line, target_path, stack)
                     # A -r inside the constraints file is requirements, not more constraints (pip's rule),
                     # so what it returns is packages, not constraints: keep them. req_lines and compiler_signs
                     # are passed through for that -r file only: the constraints file's own lines add to neither.
@@ -2243,17 +2239,15 @@ def _read_requirements(
                             req_lines,
                             compiler_signs,
                             stack=stack,
-                            chain=chain,
                         )
                     )
                 elif not already_seen and index_options is not None:
                     index_options.append(line)
                 continue
             if include:  # -r file, -rfile, --requirement file, --requirement=file, after other options too
-                target_named = Path(os.path.abspath(path.parent / include[1]))
-                target_path = target_named.resolve()
+                target_path = Path(os.path.abspath(path.parent / include[1]))
                 if target_path in stack:
-                    raise _cycle_error(path, line, target_named, chain)
+                    raise _cycle_error(path, line, target_path, stack)
                 pkgs.extend(
                     _read_requirements(
                         path.parent / include[1],
@@ -2265,7 +2259,6 @@ def _read_requirements(
                         req_lines,
                         compiler_signs,
                         stack,
-                        chain=chain,
                     )
                 )
                 continue
@@ -2306,8 +2299,7 @@ def _read_requirements(
             if req_lines is not None and not constraint:
                 req_lines.append(line)
     finally:
-        stack.remove(resolved)
-        chain.remove(path)
+        stack.remove(path)
     return pkgs
 
 

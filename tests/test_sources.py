@@ -466,8 +466,8 @@ def test_requirements_symlinked_file_missing_include_names_the_path_pip_would_op
     _try_symlink(Path("../real/reqs.txt"), tmp_path / "link" / "reqs.txt")
     with pytest.raises(FileNotFoundError) as caught:
         parse_requirements(tmp_path / "link" / "reqs.txt")
-    assert str(tmp_path / "link" / "base.txt") in str(caught.value)
-    assert str(tmp_path / "real" / "base.txt") not in str(caught.value)
+    # The filename, not str(error): that shows the path's repr, with doubled backslashes on Windows.
+    assert Path(caught.value.filename) == tmp_path / "link" / "base.txt"
 
 
 def test_requirements_file_reached_by_two_names_lists_packages_once(tmp_path):
@@ -480,6 +480,40 @@ def test_requirements_file_reached_by_two_names_lists_packages_once(tmp_path):
     (tmp_path / "real" / "base.txt").write_text("idna==3.11\n", encoding="utf-8")
     _try_symlink(Path("../real/base.txt"), tmp_path / "link" / "base.txt")
     assert [(p.name, p.version) for p in parse_requirements(path).packages] == [("idna", "3.11")]
+
+
+def test_requirements_shared_file_linked_into_two_folders_reads_each_folders_include(tmp_path):
+    # One shared file linked into two service folders, both included from one top file. The shared
+    # file's own line is listed once, but its -r base.txt is another file under each name, and pip
+    # reads both (checked with pip 26.3's parser): neither folder's packages may be dropped (#604).
+    for folder in ("shared", "a", "b"):
+        (tmp_path / folder).mkdir()
+    path = tmp_path / "top.txt"
+    path.write_text("-r a/reqs.txt\n-r b/reqs.txt\n", encoding="utf-8")
+    (tmp_path / "shared" / "reqs.txt").write_text("requests==2.32.5\n-r base.txt\n", encoding="utf-8")
+    (tmp_path / "a" / "base.txt").write_text("idna==3.11\n", encoding="utf-8")
+    (tmp_path / "b" / "base.txt").write_text("six==1.17.0\n", encoding="utf-8")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "a" / "reqs.txt")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "b" / "reqs.txt")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [
+        ("requests", "2.32.5"),
+        ("idna", "3.11"),
+        ("six", "1.17.0"),
+    ]
+
+
+def test_requirements_shared_file_on_the_chain_under_two_names_is_not_a_cycle(tmp_path):
+    # a/reqs.txt and b/reqs.txt are links to one shared file, and a's include leads to b's. The shared
+    # file is then being read under two names at once, but nothing includes itself: pip compares the
+    # names (os.path.abspath), reads on, and installs idna (checked with pip 26.3's parser) (#604).
+    for folder in ("shared", "a", "b"):
+        (tmp_path / folder).mkdir()
+    (tmp_path / "shared" / "reqs.txt").write_text("-r next.txt\n", encoding="utf-8")
+    (tmp_path / "a" / "next.txt").write_text("-r ../b/reqs.txt\n", encoding="utf-8")
+    (tmp_path / "b" / "next.txt").write_text("idna==3.11\n", encoding="utf-8")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "a" / "reqs.txt")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "b" / "reqs.txt")
+    assert [(p.name, p.version) for p in parse_requirements(tmp_path / "a" / "reqs.txt").packages] == [("idna", "3.11")]
 
 
 def test_requirements_include_cycle_through_a_symlink_is_an_error(tmp_path):
