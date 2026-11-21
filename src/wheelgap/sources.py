@@ -2189,8 +2189,21 @@ def _read_requirements(
                 # A URL (-c https://releases.openstack.org/...) or ${VAR} is left to pip: it's skipped, as before.
                 # Unread, it may name an index, so the input isn't PyPI-only.
                 if "://" not in target and "${" not in target:
-                    _read_requirements(
-                        path.parent / target, seen, constraints, True, index_options, format_control, stack=stack
+                    # A -r inside the constraints file is requirements, not more constraints (pip's rule),
+                    # so what it returns is packages, not constraints: keep them. Pass compiler_signs too,
+                    # so a pip-compile file reached by that -r still marks the input compiled, as a direct -r does.
+                    pkgs.extend(
+                        _read_requirements(
+                            path.parent / target,
+                            seen,
+                            constraints,
+                            True,
+                            index_options,
+                            format_control,
+                            req_lines,
+                            compiler_signs,
+                            stack=stack,
+                        )
                     )
                 elif not already_seen and index_options is not None:
                     index_options.append(line)
@@ -2201,7 +2214,7 @@ def _read_requirements(
                         path.parent / include[1],
                         seen,
                         constraints,
-                        constraint,
+                        False,  # a -r is requirements even inside a constraints file, as pip reads it
                         index_options,
                         format_control,
                         req_lines,

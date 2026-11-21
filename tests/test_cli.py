@@ -1343,6 +1343,21 @@ def test_requirements_constraint_picks_the_checked_release(tmp_path, fake_pypi, 
     assert "1.9" in out and "source" in out
 
 
+def test_requirements_requirement_inside_constraints_file_is_checked(tmp_path, fake_pypi, capsys):
+    # A -r inside a constraints file is requirements, not more constraints (#602): psycopg2 is
+    # checked (and builds from source here) instead of being silently skipped.
+    path = tmp_path / "a.txt"
+    path.write_text("-c cons.txt\nrequests==2.32.5\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-r extra.txt\nurllib3<3\n", encoding="utf-8")
+    (tmp_path / "extra.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+    code, out, _ = run(capsys, str(path), "-p", "3.14", "-t", "linux-x86_64", "--json")
+    assert code == 1
+    packages = {p["name"]: p for p in json.loads(out)["packages"]}
+    assert packages["psycopg2"]["results"] == {"linux-x86_64": "source"}
+    assert packages["psycopg2"]["version"] == "2.9.11"
+    assert set(packages) == {"psycopg2", "requests"}
+
+
 def test_requirements_marker_constraint_is_unknown(tmp_path, fake_pypi, capsys):
     path = tmp_path / "requirements.txt"
     path.write_text("ranged\n-c constraints.txt\n", encoding="utf-8")

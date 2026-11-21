@@ -11,6 +11,8 @@ FAKE_INDEX = {
     "winonly": {"311": ["winonly-311-cp313-cp313-win_amd64.whl"]},
     "purewheel": {"3.1": ["purewheel-3.1-py3-none-any.whl"]},
     "nowheels": {"0.9": ["nowheels-0.9.tar.gz"]},
+    # Only an sdist: pip builds it from source on every target (#602).
+    "psycopg2": {"2.9.11": ["psycopg2-2.9.11.tar.gz"]},
     # Wheels for 3.14 on Linux and Windows, but for 3.15 on Windows only: it blocks the move to 3.15 on Linux.
     "newpylag": {
         "1.0": [

@@ -253,6 +253,62 @@ def test_requirements_nested_constraints_combine_ranges_and_keep_pins(tmp_path):
     assert pinned.version == "3"
 
 
+def test_requirements_requirement_inside_constraints_file(tmp_path):
+    # pip reads a -r inside a constraints file as requirements, not more constraints (#602):
+    # the included file's packages are checked, while the constraints file's own lines stay constraints.
+    path = tmp_path / "a.txt"
+    path.write_text("-c cons.txt\nrequests==2.32.5\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-r extra.txt\nurllib3<3\n", encoding="utf-8")
+    (tmp_path / "extra.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+    src = parse_requirements(path)
+    assert [(p.name, p.version, p.origin) for p in src.packages] == [
+        ("psycopg2", "2.9.11", "extra.txt"),
+        ("requests", "2.32.5", "a.txt"),
+    ]
+    assert src.constraint_specs == {"urllib3": {"<3"}}
+
+
+def test_requirements_requirement_inside_constraints_file_keeps_compiler_signs(tmp_path):
+    # A -r inside a constraints file is read as requirements, with compiler signs (#602): a pip-compile
+    # file reached that way still marks the input compiled, as a direct -r does.
+    path = tmp_path / "a.txt"
+    path.write_text("-c cons.txt\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-r reqs.txt\n", encoding="utf-8")
+    (tmp_path / "reqs.txt").write_text("lib==2.0 \\\n    --hash=sha256:aa\n    # via app\n", encoding="utf-8")
+    src = parse_requirements(path)
+    assert src.compiled
+    assert [(p.name, p.version) for p in src.packages] == [("lib", "2.0")]
+
+
+def test_requirements_constraint_inside_constraints_file_stays_a_constraint(tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_text("ranged\n-c cons.txt\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-c nested.txt\n", encoding="utf-8")
+    (tmp_path / "nested.txt").write_text("ranged==1.9\n", encoding="utf-8")
+    (pkg,) = parse_requirements(path).packages
+    assert pkg.version == "1.9"
+
+
+def test_requirements_requirement_inside_requirement_file_is_unchanged(tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_text("-r base.txt\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("-r extra.txt\n", encoding="utf-8")
+    (tmp_path / "extra.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [("purewheel", "3.1")]
+
+
+def test_requirements_file_read_as_constraint_and_requirement_gives_both(tmp_path):
+    # The seen/stack bookkeeping is per kind of file, so a file read once as constraints and once
+    # as requirements gives both (#602).
+    path = tmp_path / "a.txt"
+    path.write_text("-c shared.txt\n-r shared.txt\n", encoding="utf-8")
+    (tmp_path / "shared.txt").write_text("ranged==1.9\npurewheel==3.1\n", encoding="utf-8")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [
+        ("ranged", "1.9"),
+        ("purewheel", "3.1"),
+    ]
+
+
 def test_requirements_marker_constraint_is_an_error(tmp_path):
     path = tmp_path / "requirements.txt"
     path.write_text("ranged\n-c constraints.txt\n", encoding="utf-8")
