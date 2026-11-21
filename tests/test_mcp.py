@@ -3198,3 +3198,20 @@ def test_check_lockfile_selection_types_are_checked_before_requesting_roots(key,
     assert reply["result"]["isError"] is True
     expected = f"'{key}' must be " + ("true or false" if key in {"all_extras", "no_dev"} else "an array of strings")
     assert expected in reply["result"]["content"][0]["text"]
+
+
+def test_modern_relative_context_asks_the_client_for_its_roots(fake_pypi, tmp_path, monkeypatch):
+    # An absolute dockerfile with context "." must not read the server's working directory (another project's).
+    root, _ = two_projects(tmp_path, monkeypatch)
+    (root / "Dockerfile").write_text(INSTALLS_REQUIREMENTS, encoding="utf-8")
+    arguments = {"dockerfile": str(root / "Dockerfile"), "inputs": True, "context": "."}
+    message = roots_call(1)
+    message["params"] |= {"name": "check_dockerfile", "arguments": arguments}
+    (asked,) = run(message)
+    assert asked["result"]["resultType"] == "input_required"
+    assert not fake_pypi
+    message = roots_call(1, {"roots": [{"uri": root.as_uri()}]})
+    message["params"] |= {"name": "check_dockerfile", "arguments": arguments}
+    (reply,) = run(message)
+    data = reply["result"]["structuredContent"]
+    assert data["path"] == str(root.resolve()) and [g["name"] for g in data["gaps"]] == ["winonly"]

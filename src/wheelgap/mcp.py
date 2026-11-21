@@ -1629,7 +1629,7 @@ def _complete(result: dict[str, Any], result_type: str = "complete") -> dict[str
 _PATH_ARGUMENTS = {
     "check_package": ("pyodide_lock",),
     "check_lockfile": ("path", "pyodide_lock"),
-    "check_dockerfile": ("dockerfile", "path"),
+    "check_dockerfile": ("dockerfile", "path", "context"),
     "check_dist": ("path",),
     "diff_lockfiles": ("old", "new"),
     "suggest_targets": ("path",),
