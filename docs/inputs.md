@@ -315,6 +315,8 @@ are skipped.
 
 A `-r FILE` line inside a constraints file is read as pip reads it: `FILE` is a requirements file, so its packages
 are checked, while the constraints file's own lines stay constraints. A `-c` inside any file is a constraints file.
+An include cycle (two files that include each other, or a file that includes itself, with `-r` or `-c`) is an input
+error naming the chain, as pip refuses it; a file included twice from two different files still lists its packages once.
 
 **Skipped:** editable lines (`-e`), local paths (lines starting with `.` or `/`) and URLs (`git+https://…`,
 `name @ https://…`). Other pip options in the file, such as `--index-url` or `--hash`, are ignored: use wheelgap's

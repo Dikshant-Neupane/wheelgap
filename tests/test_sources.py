@@ -244,9 +244,7 @@ def test_requirements_nested_constraints_combine_ranges_and_keep_pins(tmp_path):
     path.write_text("-r sub/more.txt\n-c sub/constraints.txt\n", encoding="utf-8")
     (directory / "more.txt").write_text("ranged>=1.5\npinned==3\n", encoding="utf-8")
     (directory / "constraints.txt").write_text("-c nested.txt\npinned==1\n", encoding="utf-8")
-    (directory / "nested.txt").write_text(
-        "ranged<2 \\\n    --hash=sha256:00  # note\n-c constraints.txt\n", encoding="utf-8"
-    )
+    (directory / "nested.txt").write_text("ranged<2 \\\n    --hash=sha256:00  # note\n", encoding="utf-8")
     ranged, pinned = parse_requirements(path).packages
     assert ranged.spec == "<2,>=1.5"
     assert ranged.version is None
@@ -317,14 +315,82 @@ def test_requirements_nested_includes_keep_their_kind(tmp_path):
     assert src.constraint_specs == {"fromc1": {"<2"}, "fromc2": {"<3"}, "fromc3": {"<4"}}
 
 
-def test_requirements_include_cycle_through_a_constraints_file_ends(tmp_path):
-    # a.txt -c cons.txt -r a.txt: pip refuses the loop; here the second read of a.txt is skipped, as for -r loops.
+def test_requirements_include_cycle_through_a_constraints_file_is_an_error(tmp_path):
+    # a.txt -c cons.txt -r a.txt: the chain is one chain for -r and -c together, so pip refuses the loop (#603).
     path = tmp_path / "a.txt"
     path.write_text("-c cons.txt\npurewheel==3.1\n", encoding="utf-8")
     (tmp_path / "cons.txt").write_text("-r a.txt\nranged<2\n", encoding="utf-8")
-    src = parse_requirements(path)
-    assert [(p.name, p.version) for p in src.packages] == [("purewheel", "3.1")]
-    assert src.constraint_specs == {"ranged": {"<2"}}
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(path)
+    assert str(caught.value) == (
+        "cons.txt: -r a.txt includes a file that is already being read (a.txt -> cons.txt -> a.txt); pip refuses this"
+    )
+
+
+def test_requirements_two_file_include_cycle_is_an_error(tmp_path):
+    # The issue's example: c1.txt -r c2.txt -r c1.txt. pip refuses it, and so does wheelgap (#603).
+    path = tmp_path / "c1.txt"
+    path.write_text("-r c2.txt\nrequests==2.32.5\n", encoding="utf-8")
+    (tmp_path / "c2.txt").write_text("-r c1.txt\nidna==3.11\n", encoding="utf-8")
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(path)
+    assert str(caught.value) == (
+        "c2.txt: -r c1.txt includes a file that is already being read (c1.txt -> c2.txt -> c1.txt); pip refuses this"
+    )
+
+
+@pytest.mark.parametrize("line", ["-r a.txt", "-c a.txt"])
+def test_requirements_file_including_itself_is_an_error(tmp_path, line):
+    # A file that includes itself, with -r or -c, is a cycle pip refuses (#603).
+    path = tmp_path / "a.txt"
+    path.write_text(line + "\nrequests==2.32.5\n", encoding="utf-8")
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(path)
+    assert str(caught.value) == (
+        f"a.txt: {line} includes a file that is already being read (a.txt -> a.txt); pip refuses this"
+    )
+
+
+def test_requirements_three_file_include_cycle_is_an_error(tmp_path):
+    # The chain is named in full, from the file the run started with (#603).
+    path = tmp_path / "a.txt"
+    path.write_text("-r b.txt\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("-r c.txt\n", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("-r a.txt\n", encoding="utf-8")
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(path)
+    assert str(caught.value) == (
+        "c.txt: -r a.txt includes a file that is already being read "
+        "(a.txt -> b.txt -> c.txt -> a.txt); pip refuses this"
+    )
+
+
+def test_requirements_cycle_names_are_relative_to_the_starting_folder(tmp_path):
+    # Two files with the same name in different folders stay distinguishable in the chain (#603).
+    path = tmp_path / "a.txt"
+    path.write_text("-r sub/a.txt\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.txt").write_text("-r ../a.txt\n", encoding="utf-8")
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(path)
+    assert str(caught.value) == (
+        "sub/a.txt: -r ../a.txt includes a file that is already being read "
+        "(a.txt -> sub/a.txt -> a.txt); pip refuses this"
+    )
+
+
+def test_requirements_include_diamond_lists_packages_once(tmp_path):
+    # A file included twice from two different files is fine: it is read once, as pip reads it (#603).
+    path = tmp_path / "top.txt"
+    path.write_text("-r left.txt\n-r right.txt\n", encoding="utf-8")
+    (tmp_path / "left.txt").write_text("-r base.txt\nleft==1.0\n", encoding="utf-8")
+    (tmp_path / "right.txt").write_text("-r base.txt\nright==2.0\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("base==3.0\n", encoding="utf-8")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [
+        ("base", "3.0"),
+        ("left", "1.0"),
+        ("right", "2.0"),
+    ]
 
 
 def test_requirements_constraint_inside_constraints_file_stays_a_constraint(tmp_path):
