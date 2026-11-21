@@ -339,7 +339,7 @@ def gap_wheel_sentence(fills: list[gapwheels.Fill], multi_py: bool) -> str:
     on = ", ".join(dict.fromkeys(f.target.label(multi_py) for f in fills))
     said = f" A gap wheel on wheelgap's gap wheel index fills {on} (unofficial, built by wheelgap from the PyPI sdist)"
     if command := gapwheels.pip_install(fills[0]):
-        return f"{said}: {command}."
+        return f"{said}. Install it with: {command}"
     return f"{said}; see the gap wheel section of the log for how to use it."
 
 
