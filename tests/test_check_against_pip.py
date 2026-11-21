@@ -6,10 +6,12 @@ import io
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import wheelgap
 from wheelgap import Result, make_targets
 from wheelgap.check import Status
 
@@ -377,6 +379,90 @@ def test_crash_exits_2(monkeypatch, capsys):
     monkeypatch.setattr(script, "main", crash)
     assert script.run([]) == 2
     assert "RuntimeError: boom" in capsys.readouterr().err
+
+
+# --json FILE: the results file (#552)
+
+
+def _main_json(monkeypatch, tmp_path, packages, wheels):
+    """main() with --json, a fake pip and wheelgap's fake index, on 3.13 linux-x86_64 and win-amd64."""
+    targets = make_targets("3.13", ["linux-x86_64", "win-amd64"])
+    monkeypatch.setattr(script, "default_targets", lambda: targets)
+    real_compare = script.compare
+    pip = _fake_pip(wheels)
+    monkeypatch.setattr(
+        script,
+        "compare",
+        lambda packages, targets, workers, installer: real_compare(
+            packages, targets, pip, workers=workers, installer=installer
+        ),
+    )
+    path = tmp_path / "accuracy.json"
+    code = script.main([*packages, "--json", str(path)])
+    return code, json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_json_file_counts_match_the_text_report(fake_pypi, monkeypatch, capsys, tmp_path, pip_installed):
+    # fastlib agrees on Linux (wheel) and disagrees on Windows (pip finds a wheel), nowheels agrees twice (no
+    # wheel), and not-on-index can't be compared on either target.
+    wheels = {("fastlib", "manylinux_2_36_x86_64"): True, ("fastlib", "win_amd64"): True}
+    code, data = _main_json(monkeypatch, tmp_path, ["fastlib", "nowheels", "not-on-index"], wheels)
+    out = capsys.readouterr().out
+    assert code == 1  # the file doesn't change the exit code
+    assert out.startswith(
+        "6 checks: 3 agree with pip (1 wheel, 2 no wheel), 1 disagree, 2 couldn't be compared. "
+        "Mismatch rate 25.0% (1 of 4 compared)."
+    )
+    assert data["schema"] == 1
+    assert data["installer"] == "pip" and data["installer_version"] == "pip 26.3 from x"
+    assert data["wheelgap_version"] == wheelgap.__version__
+    assert datetime.fromisoformat(data["time"]).utcoffset() == timedelta(0)
+    assert data["packages"] == ["fastlib", "nowheels", "not-on-index"]
+    assert data["targets"] == ["3.13 linux-x86_64", "3.13 win-amd64"]
+    assert data["totals"] == {"checks": 6, "compared": 4, "agree": 3, "disagree": 1, "not_compared": 2}
+    assert data["mismatch_rate"] == 0.25
+    assert data["by_target"] == {
+        "3.13 linux-x86_64": {
+            **{"checks": 3, "compared": 2, "agree": 2, "disagree": 0, "not_compared": 1},
+            "mismatch_rate": 0.0,
+        },
+        "3.13 win-amd64": {
+            **{"checks": 3, "compared": 2, "agree": 1, "disagree": 1, "not_compared": 1},
+            "mismatch_rate": 0.5,
+        },
+    }
+    [wrong] = data["disagreements"]
+    assert {k: v for k, v in wrong.items() if k != "command"} == {
+        "name": "fastlib",
+        "version": "2.0.0",
+        "target": "3.13 win-amd64",
+        "wheelgap": "source",
+        "pip": "fastlib-1.whl",
+    }
+    assert wrong["command"] in out  # the same pip command the text report prints
+    assert wrong["command"].startswith("pip install --dry-run ") and wrong["command"].endswith(" fastlib==2.0.0")
+    assert sorted(data["not_compared"], key=lambda c: c["target"]) == [
+        {"name": "not-on-index", "version": None, "target": "3.13 linux-x86_64", "why": "not on index"},
+        {"name": "not-on-index", "version": None, "target": "3.13 win-amd64", "why": "not on index"},
+    ]
+    assert "not-on-index  -        3.13 win-amd64  not on index" in out  # the reason the text gives too
+
+
+def test_json_file_when_nothing_could_be_compared(fake_pypi, monkeypatch, capsys, tmp_path, pip_installed):
+    code, data = _main_json(monkeypatch, tmp_path, ["not-on-index"], {})
+    assert code == 2
+    assert "couldn't be compared. Mismatch rate n/a (nothing compared)." in capsys.readouterr().out
+    assert data["totals"] == {"checks": 2, "compared": 0, "agree": 0, "disagree": 0, "not_compared": 2}
+    assert data["mismatch_rate"] is None
+    assert all(t["mismatch_rate"] is None for t in data["by_target"].values())
+    assert data["disagreements"] == []
+
+
+def test_no_json_file_without_the_flag(fake_pypi, monkeypatch, capsys, tmp_path, pip_installed):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(script, "compare", lambda packages, targets, workers, installer: [])
+    assert script.main(["numpy", "-t", "win-arm64"]) == 2
+    assert list(tmp_path.iterdir()) == []
 
 
 # uv 0.13.8 uses this format with --color never and redirected output.

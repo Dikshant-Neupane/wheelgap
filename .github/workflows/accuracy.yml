@@ -3,7 +3,8 @@ name: Accuracy
 # Weekly: compare wheelgap's answers with pip and uv on about 50 real PyPI packages and the targets in
 # scripts/check_against_pip.py (#226). It needs the network, so it's kept out of CI's test job, which stays
 # offline. It fails when wheelgap and an installer disagree, or when a check couldn't be made; the run's summary page
-# lists them, with a command for each disagreement.
+# lists them, with a command for each disagreement, under each installer's mismatch rate. The results are also
+# uploaded as JSON (accuracy-pip.json and accuracy-uv.json, see the script's --json) for later pages and trends.
 #
 # Read-only and no secrets: it only reads the repo and PyPI.
 
@@ -33,7 +34,7 @@ jobs:
         # pinned pip out of the environment, so --with pip resolves the newest release.
         run: |
           set -o pipefail
-          uv run --python 3.14 --no-dev --with pip python scripts/check_against_pip.py | tee accuracy-pip.log
+          uv run --python 3.14 --no-dev --with pip python scripts/check_against_pip.py --json accuracy-pip.json | tee accuracy-pip.log
       - name: Compare wheelgap with uv
         # The uv that setup-uv installs, the latest release, on purpose, as for pip. The script reads uv's
         # diagnostics by their exact wording: if a release changes it, those checks fail as "couldn't compare"
@@ -41,19 +42,33 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
-          uv run --python 3.14 --no-dev python scripts/check_against_pip.py --installer uv | tee accuracy-uv.log
+          uv run --python 3.14 --no-dev python scripts/check_against_pip.py --installer uv --json accuracy-uv.json | tee accuracy-uv.log
       - name: Summarise
         if: always()
         run: |
           for installer in pip uv; do
             log="accuracy-$installer.log"
+            json="accuracy-$installer.json"
             [ -s "$log" ] || continue  # failed before the script reported: the log says why
             {
               echo "### wheelgap against $installer"
               echo
+              if [ -s "$json" ]; then
+                jq -r 'if .mismatch_rate == null then "Mismatch rate: n/a (nothing compared)"
+                  else "Mismatch rate: \((.mismatch_rate * 1000 | round) / 10)% (\(.totals.disagree) of \(.totals.compared) compared)"
+                  end' "$json"
+                echo
+              fi
               echo '~~~~~~~~~~text'
               head -c 60000 "$log" | sed 's/^~~~~/ ~~~~/'  # the log can't close the fence
               echo
               echo '~~~~~~~~~~'
             } >> "$GITHUB_STEP_SUMMARY"
           done
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: accuracy
+          path: accuracy-*.json
+          if-no-files-found: ignore

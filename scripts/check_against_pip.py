@@ -41,6 +41,12 @@ release's wheels out for a Requires-Python with an upper bound, the check is lis
 reason, and doesn't fail the run: it is uv answering as uv, not a wheelgap error, and the pip check is the referee
 for that pin. Every other difference from uv is listed as a disagreement, to be checked against the pip run.
 
+With `--json FILE` it also writes the results as one JSON object (schema 1): the installer and its version,
+wheelgap's version, the UTC time, the packages and targets checked, the totals, the mismatch rate (disagreements
+over checks compared, null when nothing was compared), the same totals for each target, each disagreement with its
+command, and each check that couldn't be compared with the reason. The file is written whenever the report is, and
+the exit code doesn't change.
+
 It needs the network, so the tests never run it; .github/workflows/accuracy.yml runs it every week. pip runs
 isolated from pip.conf and PIP_* variables, without a cache, and writes only its small report to a temporary folder
 that is deleted after each run.
@@ -61,10 +67,11 @@ import traceback
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from wheelgap import Result, check_packages, make_targets
+from wheelgap import Result, __version__, check_packages, make_targets
 from wheelgap.check import Status
 from wheelgap.targets import DEFAULT_GLIBC, PLATFORMS, Target
 
@@ -448,16 +455,114 @@ def _table(rows: list[list[str]]) -> list[str]:
     return ["  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)).rstrip() for row in rows]
 
 
+@dataclass(frozen=True)
+class Totals:
+    """The counts report() prints and write_json() writes, counted once so the two can't disagree."""
+
+    checks: int
+    compared: int
+    agree: int
+    agree_wheel: int  # the agreements where both found a wheel
+    disagree: int
+    not_compared: int
+
+    @classmethod
+    def of(cls, checks: Sequence[Check]) -> Totals:
+        compared = [c for c in checks if c.compared]
+        agree = [c for c in compared if c.agrees]
+        return cls(
+            checks=len(checks),
+            compared=len(compared),
+            agree=len(agree),
+            agree_wheel=sum(1 for c in agree if c.wheelgap is Status.WHEEL),
+            disagree=len(compared) - len(agree),
+            not_compared=len(checks) - len(compared),
+        )
+
+    @property
+    def mismatch_rate(self) -> float | None:
+        return self.disagree / self.compared if self.compared else None
+
+    def rate_text(self) -> str:
+        if self.mismatch_rate is None:
+            return "Mismatch rate n/a (nothing compared)"
+        return f"Mismatch rate {self.mismatch_rate:.1%} ({self.disagree} of {self.compared} compared)"
+
+    def as_json(self) -> dict[str, int]:
+        return {
+            "checks": self.checks,
+            "compared": self.compared,
+            "agree": self.agree,
+            "disagree": self.disagree,
+            "not_compared": self.not_compared,
+        }
+
+
+def why_not_compared(check: Check, installer: str) -> str:
+    """The reason report() gives for a check that couldn't be compared."""
+    if check.only_binary_yanked:
+        return f"{installer} took a yanked wheel because --only-binary hides the sdist a normal install builds"
+    answer_error = check.answer.error if check.answer and check.answer.error else None
+    return check.skipped or check.error or answer_error or f"wheelgap says {check.wheelgap.value}"
+
+
+def results_json(
+    checks: Sequence[Check],
+    packages: Sequence[str],
+    targets: Sequence[Target],
+    *,
+    installer: str,
+    installer_version: str,
+    now: datetime | None = None,
+) -> dict:
+    """The run as one JSON object (schema 1), from the same counts and reasons as report()."""
+    totals = Totals.of(checks)
+    by_target = {}
+    for target in targets:
+        mine = Totals.of([c for c in checks if c.target == target])
+        by_target[label(target)] = {**mine.as_json(), "mismatch_rate": mine.mismatch_rate}
+    return {
+        "schema": 1,
+        "installer": installer,
+        "installer_version": installer_version,
+        "wheelgap_version": __version__,
+        "time": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
+        "packages": list(packages),
+        "targets": [label(t) for t in targets],
+        "totals": totals.as_json(),
+        "mismatch_rate": totals.mismatch_rate,
+        "by_target": by_target,
+        "disagreements": [
+            {
+                "name": c.name,
+                "version": c.version,
+                "target": label(c.target),
+                "wheelgap": c.wheelgap.value,
+                installer: c.answer.text if c.answer else None,
+                "command": c.command(installer),
+            }
+            for c in checks
+            if c.compared and not c.agrees
+        ],
+        "not_compared": [
+            {"name": c.name, "version": c.version, "target": label(c.target), "why": why_not_compared(c, installer)}
+            for c in checks
+            if not c.compared
+        ],
+    }
+
+
 def report(checks: list[Check], out=sys.stdout, *, installer: str = "pip") -> int:
     """Print the disagreements and the checks that couldn't be made. 1 if any disagree, else 2 if any couldn't be
     made (apart from unsupported targets and uv's known difference from pip), else 0."""
     compared = [c for c in checks if c.compared]
     wrong = [c for c in compared if not c.agrees]
     failed = [c for c in checks if not c.compared]
-    wheels = sum(1 for c in compared if c.agrees and c.wheelgap is Status.WHEEL)
+    totals = Totals.of(checks)
     print(
-        f"{len(checks)} checks: {len(compared) - len(wrong)} agree with {installer} ({wheels} wheel, "
-        f"{len(compared) - len(wrong) - wheels} no wheel), {len(wrong)} disagree, {len(failed)} couldn't be compared.",
+        f"{totals.checks} checks: {totals.agree} agree with {installer} ({totals.agree_wheel} wheel, "
+        f"{totals.agree - totals.agree_wheel} no wheel), {totals.disagree} disagree, {totals.not_compared} couldn't "
+        f"be compared. {totals.rate_text()}.",
         file=out,
     )
     if installer == "uv":
@@ -486,14 +591,7 @@ def report(checks: list[Check], out=sys.stdout, *, installer: str = "pip") -> in
         print("\nCouldn't compare:\n", file=out)
         rows = [["package", "version", "target", "why"]]
         for c in failed:
-            why = (
-                c.skipped
-                or c.error
-                or (c.answer.error if c.answer and c.answer.error else f"wheelgap says {c.wheelgap.value}")
-            )
-            if c.only_binary_yanked:
-                why = f"{installer} took a yanked wheel because --only-binary hides the sdist a normal install builds"
-            rows.append([c.name, c.version or "-", label(c.target), why or ""])
+            rows.append([c.name, c.version or "-", label(c.target), why_not_compared(c, installer)])
         print("\n".join(_table(rows)), file=out)
     return 1 if wrong else 2 if not compared or any(c.skipped is None for c in failed) else 0
 
@@ -506,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--installer", choices=("pip", "uv"), default="pip", help="installer to compare against")
     parser.add_argument("--workers", type=int, default=4, help="packages checked at once (default 4)")
+    parser.add_argument("--json", metavar="FILE", type=Path, help="also write the results to FILE as JSON")
     args = parser.parse_args(argv)
     targets = default_targets()
     if args.target:
@@ -532,7 +631,13 @@ def main(argv: list[str] | None = None) -> int:
     names = ", ".join(map(label, targets))
     print(f"Checking {len(packages)} packages on {len(targets)} targets: {names}", file=sys.stderr)
     checks = compare(packages, targets, workers=args.workers, installer=args.installer)
-    return report(checks, installer=args.installer)
+    code = report(checks, installer=args.installer)
+    if args.json:
+        data = results_json(
+            checks, packages, targets, installer=args.installer, installer_version=version.stdout.strip()
+        )
+        args.json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return code
 
 
 def run(argv: list[str] | None = None) -> int:
