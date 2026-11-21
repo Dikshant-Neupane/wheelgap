@@ -513,7 +513,7 @@ def results(
                 "version": c.version,
                 "target": label(c.target),
                 "wheelgap": c.wheelgap.value,
-                installer: c.answer.text if c.answer else "",
+                "installer_result": c.answer.text if c.answer else "",
                 "command": c.command(installer),
             }
             for c in checks
@@ -618,7 +618,8 @@ def main(argv: list[str] | None = None) -> int:
         data = results(
             checks,
             installer=args.installer,
-            installer_version=version.stdout.strip(),
+            # pip's line names the folder it runs from: leave that out of a file meant to be shared.
+            installer_version=re.sub(r" from .* \(python", " (python", version.stdout.strip()),
             packages=packages,
             targets=targets,
         )

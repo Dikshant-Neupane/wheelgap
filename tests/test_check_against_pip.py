@@ -403,7 +403,7 @@ def test_json_file_matches_the_text_report(monkeypatch, capsys, pip_installed, t
             "version": "2",
             "target": "3.14 win-arm64",
             "wheelgap": "source",
-            "pip": "x-1.whl",
+            "installer_result": "x-1.whl",
             "command": command,
         }
     ]
@@ -448,7 +448,7 @@ def test_json_file_for_uv_names_uv(monkeypatch, capsys, tmp_path):
     assert data["installer"] == "uv" and data["installer_version"] == "uv 0.13.1"
     assert data["mismatch_rate"] == 0.5
     (entry,) = data["disagreements"]
-    assert entry["uv"] == "wheel" and "pip" not in entry
+    assert entry["installer_result"] == "wheel"
     assert entry["command"].startswith("printf '%s\\n' differs==2 | uv pip compile")
     assert "Mismatch rate 50.0% (1 of 2 compared)." in text
 
