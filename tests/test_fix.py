@@ -6,6 +6,7 @@ import tomllib
 import urllib.error
 
 import pytest
+from packaging.requirements import Requirement
 from test_cli import _assert_matches_output_schema, run
 
 from wheelgap import cli, gapwheels, pypi
@@ -826,9 +827,45 @@ def test_github_annotation_says_a_gap_wheel_fills_the_gap_with_the_pip_command(
             plain[0],  # no fitting gap wheel: today's message
             # The level, title and line are the same; only win-arm64 has a gap wheel.
             plain[1] + " A gap wheel on wheelgap's gap wheel index fills win-arm64 (unofficial, built by wheelgap from "
-            f"the PyPI sdist): pip install --extra-index-url {INDEX} nowheels==0.9.",
+            f"the PyPI sdist). Install it with: pip install --extra-index-url {INDEX} nowheels==0.9",
         ]
     )
+
+
+def test_github_annotation_gap_wheel_pip_command_ends_with_the_version(
+    capsys, fake_pypi, gap_wheels, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    (tmp_path / "requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    args = [str(tmp_path / "requirements.txt"), "-p", "3.14t", "-t", "win-arm64", "--github-annotations", "--fix"]
+    code, out, _ = run(capsys, *args)
+    assert code == 1
+    (line,) = _annotations(out)
+    # Nothing after the version: a copied command must not end in a full stop pip would reject.
+    assert line.endswith("nowheels==0.9")
+    assert "Install it with: " in line
+    text = line.split("Install it with: ", 1)[1]
+    Requirement(text.split()[-1])  # raises if the last word is not a valid requirement
+
+
+def test_github_annotation_gap_wheel_pip_command_is_last_for_a_file_outside_the_workspace(
+    capsys, fake_pypi, gap_wheels, tmp_path, monkeypatch
+):
+    # A file GitHub can't show in the diff is named in the message, "(in FILE)". That comes before the gap wheel
+    # sentence, so the pip command still ends the annotation (#609).
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path / "repo"))
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    req = tmp_path / "elsewhere" / "requirements.txt"
+    req.write_text("nowheels==0.9\n", encoding="utf-8")
+    code, out, _ = run(capsys, str(req), "-p", "3.14t", "-t", "win-arm64", "--github-annotations", "--fix")
+    assert code == 1
+    (line,) = _annotations(out)
+    assert line.startswith("::error title=")  # no file= property: it's outside the workspace
+    assert " (in " in line and line.index(" (in ") < line.index(" A gap wheel on wheelgap's gap wheel index")
+    assert line.endswith(f"Install it with: pip install --extra-index-url {INDEX} nowheels==0.9")
 
 
 def test_github_annotation_for_a_uv_lock_points_to_the_logs_gap_wheel_section(
@@ -866,5 +903,5 @@ def test_github_annotation_warning_keeps_its_level_with_a_gap_wheel(capsys, fake
     assert was.startswith("::warning title=nowheels 0.9%3A builds from source::")
     assert now == was + (
         " A gap wheel on wheelgap's gap wheel index fills win-arm64 (unofficial, built by wheelgap from the PyPI "
-        f"sdist): pip install --extra-index-url {INDEX} nowheels==0.9."
+        f"sdist). Install it with: pip install --extra-index-url {INDEX} nowheels==0.9"
     )
