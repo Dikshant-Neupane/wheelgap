@@ -253,6 +253,109 @@ def test_requirements_nested_constraints_combine_ranges_and_keep_pins(tmp_path):
     assert pinned.version == "3"
 
 
+def test_requirements_requirement_inside_constraints_file(tmp_path):
+    # pip reads a -r inside a constraints file as requirements, not more constraints (#602):
+    # the included file's packages are checked, while the constraints file's own lines stay constraints.
+    path = tmp_path / "a.txt"
+    path.write_text("-c cons.txt\nrequests==2.32.5\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-r extra.txt\nurllib3<3\n", encoding="utf-8")
+    (tmp_path / "extra.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+    src = parse_requirements(path)
+    assert [(p.name, p.version, p.origin) for p in src.packages] == [
+        ("psycopg2", "2.9.11", "extra.txt"),
+        ("requests", "2.32.5", "a.txt"),
+    ]
+    assert src.constraint_specs == {"urllib3": {"<3"}}
+
+
+def test_requirements_requirement_inside_constraints_file_keeps_compiler_signs(tmp_path):
+    # A -r inside a constraints file is read as requirements, with compiler signs (#602): a pip-compile
+    # file reached that way still marks the input compiled, as a direct -r does.
+    path = tmp_path / "a.txt"
+    path.write_text("-c cons.txt\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-r reqs.txt\n", encoding="utf-8")
+    (tmp_path / "reqs.txt").write_text("lib==2.0 \\\n    --hash=sha256:aa\n    # via app\n", encoding="utf-8")
+    src = parse_requirements(path)
+    assert src.compiled
+    assert [(p.name, p.version) for p in src.packages] == [("lib", "2.0")]
+
+
+def test_requirements_hashes_in_a_constraints_file_do_not_mark_the_input_compiled(tmp_path):
+    # Only requirement lines mark the input compiled: a constraints file with --hash lines and "# via" comments
+    # (pip-compile output used with -c) leaves it as it was, so --deps still resolves the requirements (#602).
+    path = tmp_path / "a.txt"
+    path.write_text("lib==2.0\n-c cons.txt\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text(
+        "lib==2.0 \\\n    --hash=sha256:aa\n    # via app\n-c nested.txt\n", encoding="utf-8"
+    )
+    (tmp_path / "nested.txt").write_text("other==1.0 --hash=sha256:bb\n", encoding="utf-8")
+    src = parse_requirements(path)
+    assert not src.compiled
+    assert [(p.name, p.version) for p in src.packages] == [("lib", "2.0")]
+
+
+def test_requirements_nested_includes_keep_their_kind(tmp_path):
+    # pip: a -r file is requirements and a -c file is constraints, whatever file the line is in (#602).
+    # top -c c1 -> -r r1 -> -c c2, and top -r r2 -> -c c3 -> -r r3, with includes in subfolders
+    # resolved against the including file's folder.
+    (tmp_path / "sub" / "deep").mkdir(parents=True)
+    path = tmp_path / "top.txt"
+    path.write_text("-c sub/c1.txt\n-r sub/r2.txt\ntopreq\n", encoding="utf-8")
+    (tmp_path / "sub" / "c1.txt").write_text("-r deep/r1.txt\nfromc1<2\n", encoding="utf-8")
+    (tmp_path / "sub" / "deep" / "r1.txt").write_text("-c c2.txt\nfromr1==1.0\n", encoding="utf-8")
+    (tmp_path / "sub" / "deep" / "c2.txt").write_text("fromc2<3\n", encoding="utf-8")
+    (tmp_path / "sub" / "r2.txt").write_text("-c deep/c3.txt\nfromr2==2.0\n", encoding="utf-8")
+    (tmp_path / "sub" / "deep" / "c3.txt").write_text("-r r3.txt\nfromc3<4\n", encoding="utf-8")
+    (tmp_path / "sub" / "deep" / "r3.txt").write_text("fromr3==3.0\n", encoding="utf-8")
+    src = parse_requirements(path)
+    assert [(p.name, p.version, p.origin) for p in src.packages] == [
+        ("fromr1", "1.0", "r1.txt"),
+        ("fromr3", "3.0", "r3.txt"),
+        ("fromr2", "2.0", "r2.txt"),
+        ("topreq", None, "top.txt"),
+    ]
+    assert src.constraint_specs == {"fromc1": {"<2"}, "fromc2": {"<3"}, "fromc3": {"<4"}}
+
+
+def test_requirements_include_cycle_through_a_constraints_file_ends(tmp_path):
+    # a.txt -c cons.txt -r a.txt: pip refuses the loop; here the second read of a.txt is skipped, as for -r loops.
+    path = tmp_path / "a.txt"
+    path.write_text("-c cons.txt\npurewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-r a.txt\nranged<2\n", encoding="utf-8")
+    src = parse_requirements(path)
+    assert [(p.name, p.version) for p in src.packages] == [("purewheel", "3.1")]
+    assert src.constraint_specs == {"ranged": {"<2"}}
+
+
+def test_requirements_constraint_inside_constraints_file_stays_a_constraint(tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_text("ranged\n-c cons.txt\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("-c nested.txt\n", encoding="utf-8")
+    (tmp_path / "nested.txt").write_text("ranged==1.9\n", encoding="utf-8")
+    (pkg,) = parse_requirements(path).packages
+    assert pkg.version == "1.9"
+
+
+def test_requirements_requirement_inside_requirement_file_is_unchanged(tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_text("-r base.txt\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("-r extra.txt\n", encoding="utf-8")
+    (tmp_path / "extra.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [("purewheel", "3.1")]
+
+
+def test_requirements_file_read_as_constraint_and_requirement_gives_both(tmp_path):
+    # The seen/stack bookkeeping is per kind of file, so a file read once as constraints and once
+    # as requirements gives both (#602).
+    path = tmp_path / "a.txt"
+    path.write_text("-c shared.txt\n-r shared.txt\n", encoding="utf-8")
+    (tmp_path / "shared.txt").write_text("ranged==1.9\npurewheel==3.1\n", encoding="utf-8")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [
+        ("ranged", "1.9"),
+        ("purewheel", "3.1"),
+    ]
+
+
 def test_requirements_marker_constraint_is_an_error(tmp_path):
     path = tmp_path / "requirements.txt"
     path.write_text("ranged\n-c constraints.txt\n", encoding="utf-8")

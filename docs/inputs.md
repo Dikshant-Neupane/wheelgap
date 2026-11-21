@@ -313,6 +313,9 @@ leaves the package `unknown` rather than guessed: one with an environment marker
 exact versions. Constraint files given as a URL or an environment variable (`-c https://…`, `-c ${PIP_CONSTRAINT}`)
 are skipped.
 
+A `-r FILE` line inside a constraints file is read as pip reads it: `FILE` is a requirements file, so its packages
+are checked, while the constraints file's own lines stay constraints. A `-c` inside any file is a constraints file.
+
 **Skipped:** editable lines (`-e`), local paths (lines starting with `.` or `/`) and URLs (`git+https://…`,
 `name @ https://…`). Other pip options in the file, such as `--index-url` or `--hash`, are ignored: use wheelgap's
 own [`--index-url`](cli.md#index-url) to look packages up on another index.

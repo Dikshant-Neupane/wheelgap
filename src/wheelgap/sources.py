@@ -2142,7 +2142,7 @@ def _read_requirements(
     """`index_options` collects the lines that may point pip at another index: index options (--index-url,
     --extra-index-url, --find-links, --no-index), includes that aren't read, and abbreviated include options.
     `req_lines` collects requirement lines that aren't constraints, for --deps; `compiler_signs` notes the
-    `--hash` options and `# via` comments that mark pip-compile output."""
+    `--hash` options and `# via` comments that mark pip-compile output, in requirement files only."""
     path = path.resolve()
     if stack is None:
         stack = {False: set(), True: set()}
@@ -2157,7 +2157,7 @@ def _read_requirements(
         # utf-8-sig: a byte order mark (Windows editors) mustn't hide an option on the first line.
         lines = raw_lines if raw_lines is not None else _join_continued_lines(path.read_text(encoding="utf-8-sig"))
         for raw in lines:
-            if compiler_signs is not None and _VIA_COMMENT_RE.match(raw.lstrip()):
+            if compiler_signs is not None and not constraint and _VIA_COMMENT_RE.match(raw.lstrip()):
                 compiler_signs.append("via")  # pip-compile writes "# via <name>" comment lines
             line = _COMMENT_RE.split(raw, 1)[0].strip()  # " # note" or "<TAB># note"
             if not line or line.startswith("#"):
@@ -2189,8 +2189,21 @@ def _read_requirements(
                 # A URL (-c https://releases.openstack.org/...) or ${VAR} is left to pip: it's skipped, as before.
                 # Unread, it may name an index, so the input isn't PyPI-only.
                 if "://" not in target and "${" not in target:
-                    _read_requirements(
-                        path.parent / target, seen, constraints, True, index_options, format_control, stack=stack
+                    # A -r inside the constraints file is requirements, not more constraints (pip's rule),
+                    # so what it returns is packages, not constraints: keep them. req_lines and compiler_signs
+                    # are passed through for that -r file only: the constraints file's own lines add to neither.
+                    pkgs.extend(
+                        _read_requirements(
+                            path.parent / target,
+                            seen,
+                            constraints,
+                            True,
+                            index_options,
+                            format_control,
+                            req_lines,
+                            compiler_signs,
+                            stack=stack,
+                        )
                     )
                 elif not already_seen and index_options is not None:
                     index_options.append(line)
@@ -2201,7 +2214,7 @@ def _read_requirements(
                         path.parent / include[1],
                         seen,
                         constraints,
-                        constraint,
+                        False,  # a -r is requirements even inside a constraints file, as pip reads it
                         index_options,
                         format_control,
                         req_lines,
@@ -2222,7 +2235,12 @@ def _read_requirements(
             if already_seen:
                 continue
             tokens = line.split()
-            if compiler_signs is not None and any(t == "--hash" or t.startswith("--hash=") for t in tokens):
+            # Only on requirement lines: a --hash or "# via" in a constraints file never marked the input compiled.
+            if (
+                compiler_signs is not None
+                and not constraint
+                and any(t == "--hash" or t.startswith("--hash=") for t in tokens)
+            ):
                 compiler_signs.append("hash")
             # Drop --hash=sha256:... and "--hash sha256:..." (option and value as two tokens).
             line = " ".join(
