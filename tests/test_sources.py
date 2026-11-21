@@ -352,6 +352,7 @@ def test_requirements_format_option_before_include_still_applies(tmp_path):
         # optparse takes the token after an option with a value as that value, even one starting with -
         ("--no-binary -r base.txt", ["fastlib"]),
         ("--extra -r base.txt", ["fastlib"]),  # an abbreviation of --extra-index-url
+        ("-C -r base.txt", ["fastlib"]),  # -C is short for --config-settings
         ("-i -cpins.txt -r base.txt", ["purewheel", "fastlib"]),
         ("--pre -r base.txt", ["purewheel", "fastlib"]),  # --pre is an option of its own, not short for --prefer-binary
     ],

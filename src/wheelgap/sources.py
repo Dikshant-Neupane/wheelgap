@@ -1857,7 +1857,7 @@ _FLAG_OPTIONS = ("--no-index", "--pre", "--prefer-binary", "--require-hashes")
 def _takes_value(token: str) -> bool:
     """Whether optparse reads the token after this one as its value: `-i URL`, `--no-binary :all:`, or an
     abbreviation optparse expands to one of these (`--extra URL`)."""
-    if token in ("-i", "-f"):
+    if token in ("-i", "-f", "-C"):  # -C is short for --config-settings
         return True
     if "=" in token or not token.startswith("--") or len(token) <= 2:
         return False
@@ -2157,18 +2157,25 @@ def _read_requirements(
             line = _COMMENT_RE.split(raw, 1)[0].strip()  # " # note" or "<TAB># note"
             if not line or line.startswith("#"):
                 continue
-            if (
-                not already_seen
-                and index_options is not None
-                and (_names_index_option(line) or _abbreviated_include(line))
-            ):
-                index_options.append(line)
-            include = None
+            tokens = None
             if line.startswith("-"):
                 try:
                     tokens = shlex.split(line)  # as pip reads a line of options
                 except ValueError:
                     raise SourceError(f"{path.name}: pip can't split this line (an unclosed quote?): {line}") from None
+            # Checked on the split tokens too, so a quoted option (`--pre "--req" more.txt`) is seen as pip sees it.
+            if (
+                not already_seen
+                and index_options is not None
+                and any(
+                    _names_index_option(text) or _abbreviated_include(text)
+                    for text in (line, " ".join(tokens or []))
+                    if text
+                )
+            ):
+                index_options.append(line)
+            include = None
+            if tokens is not None:
                 include = _line_include(tokens, path.name)
             if include and format_control is not None:
                 _apply_format_options(line, format_control)  # pip applies `--no-binary X -r f` before reading f

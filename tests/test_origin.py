@@ -132,6 +132,7 @@ def package(tmp_path, files, name="nowheels"):
         ({"requirements.txt": "--requirem more.txt\nnowheels==0.9\n", "more.txt": ""}, False),
         ({"requirements.txt": "--cons=more.txt\nnowheels==0.9\n", "more.txt": ""}, False),
         ({"requirements.txt": "--pre --req more.txt\nnowheels==0.9\n", "more.txt": ""}, False),
+        ({"requirements.txt": '--pre "--req" more.txt\nnowheels==0.9\n', "more.txt": ""}, False),
         (
             {"requirements.txt": "--pre -r more.txt\nnowheels==0.9\n", "more.txt": "--index-url https://x.example/s\n"},
             False,
