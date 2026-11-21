@@ -494,7 +494,7 @@ def results(
     targets: Sequence[Target],
 ) -> dict:
     """--json's object. `installer_version`: the installer's own version line (`pip --version`, `uv --version`).
-    A disagreement's answer from the installer is under the installer's name (`pip` or `uv`), next to `wheelgap`."""
+    A disagreement's answer from the installer is under `installer_result`, next to `wheelgap`."""
     counts = totals(checks)
     return {
         "schema": 1,
